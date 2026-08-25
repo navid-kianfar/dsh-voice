@@ -1,0 +1,45 @@
+# dsh-voice — voice input for the DeepSeek Harness Web Client.
+#
+# The Consumer and its browser surface are always composed; the transcription
+# providers are not, because each needs a deployment-specific answer (an
+# endpoint and key, or a binary and model file) that no default can supply.
+# With neither mounted the composer seat renders nothing at all and the settings
+# card says why, so an unconfigured install shows no dead control.
+#
+# Enable exactly ONE provider row: both claim `ctx.transcription`, and a
+# composition mounting both fails loudly at load rather than picking one.
+# Override any row from your profile's own cordis.patch.yml by `id`, restating
+# every key the row needs — a patch replaces a row's whole `config`.
+- insert:
+    - id: voice
+      name: '@achasoft/dsh-voice/host'
+      config:
+        maxClipSeconds: 120
+        # 25 MiB is the documented per-file ceiling of the hosted Whisper API;
+        # the local provider has no ceiling of its own, so this is the binding
+        # limit for both and the browser stops recording long before it.
+        maxClipBytes: 26214400
+        interactionMode: toggle
+        insertMode: append
+
+    - id: voice-ui
+      name: '@achasoft/dsh-voice/ui'
+
+    - id: voice-openai-compatible
+      name: '@achasoft/dsh-voice/openai-compatible'
+      disabled: true
+      config:
+        baseUrl: https://api.openai.com/v1
+        model: whisper-1
+        apiKeyEnv: OPENAI_API_KEY
+        timeoutMs: 120000
+
+    - id: voice-whisper-cpp
+      name: '@achasoft/dsh-voice/whisper-cpp'
+      disabled: true
+      config:
+        binaryPath: whisper-cli
+        modelPath: ''
+        timeoutMs: 300000
+        maxOutputBytes: 262144
+        graceMs: 5000

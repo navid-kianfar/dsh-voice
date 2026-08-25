@@ -1,0 +1,50 @@
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--dsh-border, rgb(0 0 0 / 10%));
+  border-radius: 12px;
+}
+
+.head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.title {
+  font-weight: 600;
+}
+
+.description,
+.status {
+  font-size: 13px;
+  color: var(--dsh-text-secondary, inherit);
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid currentColor;
+}
+
+.ready { color: var(--dsh-success, #1a7f37); }
+.notReady { color: var(--dsh-danger, #d93025); }
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.label {
+  font-size: 13px;
+}
+
+.control {
+  min-width: 220px;
+}

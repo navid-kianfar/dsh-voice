@@ -1,0 +1,56 @@
+/** `voice` namespace dictionaries (the composer microphone control and the voice settings card). */
+
+/** Simplified Chinese dictionary (the key-set source of truth). */
+export const zh = {
+  'mic.idle.aria': '开始语音输入',
+  'mic.idle.title': '开始语音输入',
+  'mic.hold.title': '按住说话',
+  'mic.recording.aria': '正在录音，按下停止并转写',
+  'mic.recording.title': '正在录音 — 点击停止并转写',
+  'mic.transcribing.aria': '正在转写',
+  'mic.transcribing.title': '正在转写…',
+  'mic.unconfigured.title': '语音输入尚未配置',
+  'settings.title': '语音输入',
+  'settings.description': '用麦克风口述提示词。转写文本会进入输入框，发送前可以修改。',
+  'settings.provider': '转写服务',
+  'settings.provider.none': '未挂载转写服务',
+  'settings.status.ready': '就绪',
+  'settings.status.notReady': '未就绪',
+  'settings.interaction': '录音方式',
+  'settings.interaction.toggle': '点击开始 / 点击结束',
+  'settings.interaction.hold': '按住说话',
+  'settings.insert': '转写结果',
+  'settings.insert.append': '追加到输入框',
+  'settings.insert.replace': '替换输入框',
+  'settings.maxClipSeconds': '最长录音（秒）',
+  'settings.language': '语言（BCP-47，留空自动识别）',
+} satisfies Record<string, string>
+
+/** The voice namespace key union. */
+export type VoiceKey = keyof typeof zh
+
+/** English dictionary, checked complete against the zh key set. */
+export const en = {
+  'mic.idle.aria': 'Start voice input',
+  'mic.idle.title': 'Start voice input',
+  'mic.hold.title': 'Hold to talk',
+  'mic.recording.aria': 'Recording, press to stop and transcribe',
+  'mic.recording.title': 'Recording — click to stop and transcribe',
+  'mic.transcribing.aria': 'Transcribing',
+  'mic.transcribing.title': 'Transcribing…',
+  'mic.unconfigured.title': 'Voice input is not configured',
+  'settings.title': 'Voice input',
+  'settings.description': 'Dictate prompts with your microphone. The transcript lands in the composer, where you can edit it before sending.',
+  'settings.provider': 'Transcription provider',
+  'settings.provider.none': 'No transcription provider is mounted',
+  'settings.status.ready': 'Ready',
+  'settings.status.notReady': 'Not ready',
+  'settings.interaction': 'Recording gesture',
+  'settings.interaction.toggle': 'Click to start, click to stop',
+  'settings.interaction.hold': 'Hold to talk',
+  'settings.insert': 'Transcript',
+  'settings.insert.append': 'Append to the composer',
+  'settings.insert.replace': 'Replace the composer',
+  'settings.maxClipSeconds': 'Maximum recording (seconds)',
+  'settings.language': 'Language (BCP-47; blank auto-detects)',
+} satisfies Record<VoiceKey, string>
