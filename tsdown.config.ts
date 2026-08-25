@@ -84,7 +84,6 @@ const nodeHalf: UserConfig = {
     host: `${TSC_OUT}/host/index.js`,
     'openai-compatible': `${TSC_OUT}/providers/openai-compatible.js`,
     'whisper-cpp': `${TSC_OUT}/providers/whisper-cpp.js`,
-    ui: `${TSC_OUT}/ui.js`,
     remote: 'generated/typert.remote-client.js',
     'typert.host': 'generated/typert.host.js',
   },

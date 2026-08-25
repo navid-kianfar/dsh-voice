@@ -22,8 +22,11 @@
         interactionMode: toggle
         insertMode: append
 
+    # The BARE package name, deliberately: the Web Client discovers a browser half
+    # by resolving `<row name>/package.json`, so a subpath row here would leave the
+    # composer seat silently unserved.
     - id: voice-ui
-      name: '@achasoft/dsh-voice/ui'
+      name: '@achasoft/dsh-voice'
 
     - id: voice-openai-compatible
       name: '@achasoft/dsh-voice/openai-compatible'

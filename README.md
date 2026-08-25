@@ -159,7 +159,7 @@ pnpm run regen:typert /path/to/deepseek-harness
 
 That script stages the Host sources in the harness, builds, copies the artifacts back, and restores the checkout. It refuses to run against a dirty working tree.
 
-`pnpm install` may exit non-zero with `ERR_PNPM_IGNORED_BUILDS: esbuild` on some pnpm 11 builds. It is a warning about a dev-only transitive dependency — the build and the tests are unaffected, and consumers of the published package never install esbuild at all.
+On a fresh clone pnpm may refuse esbuild's postinstall (`ERR_PNPM_IGNORED_BUILDS`), which then blocks every `pnpm run`. Run `pnpm approve-builds` once and pick esbuild. It is a dev-only transitive of vitest; consumers of the published package never install it.
 
 ## Known limitations
 

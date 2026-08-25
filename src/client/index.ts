@@ -83,8 +83,15 @@ export interface VoiceSettingsInjected {
   setField: (field: string, value: unknown) => Promise<void>
 }
 
-/** Required services: the two slot seats, the Remote namespace, locale, and the settings scope. */
-export const inject = ['slots', 'locale', 'remote', 'remote.voice', 'settingsScope']
+/**
+ * Required services of the OUTER plugin: locale and the Remote mount point.
+ *
+ * Deliberately NOT `remote.voice`. This plugin's apply creates that namespace by mounting its own
+ * contribution, so it cannot also wait for it — and Cordis refuses to read a service the fiber did
+ * not inject. Both halves of that bind are resolved by the child plugin below, which injects
+ * `remote.voice` after the parent has provided it.
+ */
+export const inject = ['locale', 'remote']
 
 /**
  * Client plugin body: mount this plugin's own Remote namespace, then register the composer control
@@ -93,11 +100,25 @@ export const inject = ['slots', 'locale', 'remote', 'remote.voice', 'settingsSco
  * @returns after the `voice` namespace is callable; its methods are withdrawn when this fiber unloads.
  */
 export async function apply(ctx: ClientContext): Promise<void> {
-  // Mounted on THIS fiber, so the endpoint's lifetime is the plugin's. Awaited before the seats
-  // register: a component must never reach a method the gateway has not installed yet.
+  // Mounted on THIS fiber, so the endpoint's lifetime is the plugin's.
   await ctx.remote.$mount(voiceRemote)
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-voice: dictionaries')
 
+  // The surface is a child so it can INJECT the namespace its parent just provided. Cordis will not
+  // hand a fiber a service it did not declare, and the parent cannot declare one it creates itself;
+  // the split is what lets the seats hold a properly injected reference.
+  ctx.plugin({
+    name: 'voice-surface',
+    inject: ['slots', 'settingsScope', 'locale', 'remote', 'remote.voice'],
+    apply: surface,
+  })
+}
+
+/**
+ * Register the composer seat and the settings card against a context that has the voice namespace.
+ * @param ctx - the child fiber, with `remote.voice` injected.
+ */
+function surface(ctx: ClientContext): void {
   // Both endpoints return the carrier's RemoteResult envelope. A transport failure is a different
   // fact from a transcription failure, so it is thrown rather than folded into the business union
   // the Host defines: the surfaces catch it and show the RPC diagnostic verbatim.

@@ -27,9 +27,6 @@
     "./whisper-cpp": {
       "default": "./lib/whisper-cpp.js"
     },
-    "./ui": {
-      "default": "./lib/ui.js"
-    },
     "./client": {
       "default": "./lib/client.js"
     },
