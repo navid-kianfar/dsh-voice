@@ -6,7 +6,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { VoiceCapabilityView } from '../host/types.ts'
 import { MicIcon } from './MicIcon.tsx'
 import { appendTranscript } from './draft.ts'
-import { startRecording, type RecordingSession } from './recorder.ts'
+import { startRecording, type AutoStopReason, type RecordingSession } from './recorder.ts'
 import type { VoiceControlInjected } from './index.ts'
 import css from './VoiceControl.module.css'
 
@@ -15,7 +15,7 @@ export type VoiceControlProps =
   PropsRuntime<'conversation.input.left'> & InjectFace<VoiceControlInjected> & PropsLocale<'voice'>
 
 /** What the control is doing right now; every transition is driven by a user gesture or a settled promise. */
-type Phase = 'idle' | 'recording' | 'transcribing'
+type Phase = 'idle' | 'recording' | 'transcribing' | 'polishing'
 
 /**
  * Failure copy for one transcription outcome. Error surfaces stay English by repository policy, so
@@ -43,12 +43,19 @@ function describeFailure(code: string): string {
  * The gesture (`toggle` or `hold`) and the insertion rule come from the Host's voice settings, so
  * this component reads policy rather than owning it.
  */
-export function VoiceControl({ useInput, inputActions, describeVoice, transcribe, t }: VoiceControlProps) {
+export function VoiceControl({
+  useInput, inputActions, describeVoice, transcribe, polish, readDevice, t,
+}: VoiceControlProps) {
   const draft = useInput(state => state.draft)
   const [view, setView] = useState<VoiceCapabilityView | null>(null)
   const [phase, setPhase] = useState<Phase>('idle')
   const [elapsedMs, setElapsedMs] = useState(0)
+  const [level, setLevel] = useState(0)
+  const [interim, setInterim] = useState('')
   const [error, setError] = useState<string | null>(null)
+  // The draft as it stood when recording began. Comparing against it at insert time is what makes a
+  // `replace` safe: text typed DURING dictation is the person's, and must not be thrown away.
+  const draftAtStartRef = useRef('')
   const sessionRef = useRef<RecordingSession | null>(null)
   const aliveRef = useRef(true)
   // Read through a call rather than the property: an `await` can unmount this component, but the
@@ -90,6 +97,7 @@ export function VoiceControl({ useInput, inputActions, describeVoice, transcribe
     sessionRef.current = null
     if (session === null) return
     setPhase('transcribing')
+    setLevel(0)
     try {
       const clip = await session.stop()
       const result = await transcribe(clip)
@@ -102,16 +110,34 @@ export function VoiceControl({ useInput, inputActions, describeVoice, transcribe
         setError('nothing was heard')
         return
       }
-      inputActions.setDraft(view?.insertMode === 'replace'
-        ? result.text
-        : appendTranscript(draftRef.current, result.text))
+
+      let text = result.text
+      if (view?.polish === true) {
+        setPhase('polishing')
+        // A failed cleanup is not a failed dictation: the raw transcript is always usable, so the
+        // failure is swallowed and the original text goes in.
+        const polished = await polish(text).catch(() => null)
+        if (!alive()) return
+        if (polished !== null && polished.ok && polished.text !== '') text = polished.text
+      }
+
+      const draftNow = draftRef.current
+      const typedDuring = draftNow !== draftAtStartRef.current
+      // `replace` becomes `append` when the person typed while dictating — discarding their
+      // keystrokes to honour a preference they set earlier is never what they meant.
+      inputActions.setDraft(view?.insertMode === 'replace' && !typedDuring
+        ? text
+        : appendTranscript(draftNow, text))
     } catch (cause) {
       if (!alive()) return
       setError(cause instanceof Error ? cause.message : 'transcription failed')
     } finally {
-      if (alive()) setPhase('idle')
+      if (alive()) {
+        setPhase('idle')
+        setInterim('')
+      }
     }
-  }, [inputActions, transcribe, view?.insertMode])
+  }, [inputActions, transcribe, polish, view?.insertMode, view?.polish])
 
   const begin = useCallback(async (): Promise<void> => {
     setError(null)
@@ -124,9 +150,27 @@ export function VoiceControl({ useInput, inputActions, describeVoice, transcribe
       return
     }
     try {
+      draftAtStartRef.current = draftRef.current
+      setInterim('')
+      let interimBusy = false
       sessionRef.current = await startRecording({
         accepted: current.acceptedMediaTypes,
         maxMs: current.maxClipSeconds * 1000,
+        ...readDevice() === undefined ? {} : { deviceId: readDevice() as string },
+        ...current.silenceStopMs === undefined ? {} : { silenceStopMs: current.silenceStopMs },
+        ...current.liveIntervalMs === undefined ? {} : { liveIntervalMs: current.liveIntervalMs },
+        onLevel: (next) => { if (alive()) setLevel(next) },
+        onInterim: (clip) => {
+          // Provisional passes are dropped rather than queued when one is still in flight, and they
+          // never touch the draft: the composer only changes once, when the person stops speaking.
+          if (interimBusy || !alive()) return
+          interimBusy = true
+          void transcribe(clip)
+            .then((result) => { if (alive() && result.ok && result.text !== '') setInterim(result.text) })
+            .catch(() => {})
+            .finally(() => { interimBusy = false })
+        },
+        onAutoStop: (reason: AutoStopReason) => { if (alive() && reason === 'silence') void finish() },
       })
       if (!alive()) {
         sessionRef.current.cancel()
@@ -138,7 +182,7 @@ export function VoiceControl({ useInput, inputActions, describeVoice, transcribe
       if (!alive()) return
       setError(cause instanceof Error ? cause.message : 'could not open the microphone')
     }
-  }, [describeVoice, view])
+  }, [describeVoice, view, transcribe, readDevice, finish])
 
   // An unmounted capability leaves the seat empty rather than showing a dead button: a deployment
   // that composed no provider pays no layout, the same contract the named composer seats keep.
@@ -161,22 +205,25 @@ export function VoiceControl({ useInput, inputActions, describeVoice, transcribe
     if (hold && phase === 'recording') void finish()
   }
 
+  const working = phase === 'transcribing' || phase === 'polishing'
   const label = phase === 'recording'
     ? t('mic.recording.aria')
-    : phase === 'transcribing' ? t('mic.transcribing.aria') : t('mic.idle.aria')
+    : working ? t('mic.transcribing.aria') : t('mic.idle.aria')
   const title = !view.ready
     ? t('mic.unconfigured.title')
     : phase === 'recording'
       ? t('mic.recording.title')
-      : phase === 'transcribing'
-        ? t('mic.transcribing.title')
-        : hold ? t('mic.hold.title') : t('mic.idle.title')
+      : phase === 'polishing'
+        ? t('mic.polishing.title')
+        : phase === 'transcribing'
+          ? t('mic.transcribing.title')
+          : hold ? t('mic.hold.title') : t('mic.idle.title')
 
   return (
     <span className={css.wrap}>
       <button
         type="button"
-        className={`${css.button} ${phase === 'recording' ? css.recording : ''} ${phase === 'transcribing' ? css.busy : ''}`}
+        className={`${css.button} ${phase === 'recording' ? css.recording : ''} ${working ? css.busy : ''}`}
         aria-label={label}
         aria-pressed={phase === 'recording'}
         title={title}
@@ -189,8 +236,26 @@ export function VoiceControl({ useInput, inputActions, describeVoice, transcribe
         <MicIcon />
       </button>
       {phase === 'recording' && (
-        <span className={css.elapsed} role="timer">{Math.floor(elapsedMs / 1000)}s</span>
+        <>
+          {/* A live level meter, not a spinner: it distinguishes "recording" from "hearing you",
+              which is the difference between a dead mic and a working one. */}
+          <span className={css.meter} aria-hidden>
+            {[0, 1, 2].map(bar => (
+              <span
+                key={bar}
+                className={css.bar}
+                style={{ transform: `scaleY(${Math.max(0.15, Math.min(1, level * (bar === 1 ? 1.4 : 0.9)))})` }}
+              />
+            ))}
+          </span>
+          <span className={css.elapsed} role="timer">{Math.floor(elapsedMs / 1000)}s</span>
+        </>
       )}
+      {/* Provisional text never reaches the draft; the composer changes once, when dictation ends. */}
+      {phase === 'recording' && interim !== '' && (
+        <span className={css.interim} title={interim}>{interim}</span>
+      )}
+      {phase === 'polishing' && <span className={css.elapsed}>{t('mic.polishing.short')}</span>}
       {/* Failure copy stays English (error-surface policy: not localized). */}
       {error !== null && <span className={css.error} role="status" title={error}>{error}</span>}
     </span>

@@ -1,3 +1,14 @@
+/**
+ * Microphone capture and clip preparation. React-free by the client layering rule: this module owns
+ * device access, recording lifetime, loudness metering, and encoding, and hands back plain data.
+ *
+ * Format is negotiated, not assumed. The recorder captures in whatever container the browser
+ * supports and re-encodes to 16 kHz mono WAV only when the mounted provider accepts nothing the
+ * browser can produce directly — which is how a local whisper.cpp build gets the one format it reads
+ * without putting an audio converter on the Host.
+ * @module @achasoft/dsh-voice/client/recorder
+ */
+
 import {
   WAV_SAMPLE_RATE,
   bareMediaType,
@@ -5,17 +16,6 @@ import {
   encodeWav,
   toBase64,
 } from './audio.ts'
-
-/**
- * Microphone capture and clip preparation. React-free by the client layering rule: this module owns
- * device access, recording lifetime, and encoding, and hands back plain data.
- *
- * Format is negotiated, not assumed. The recorder captures in whatever container the browser
- * supports, and re-encodes to 16 kHz mono WAV only when the mounted provider accepts nothing the
- * browser can produce directly — which is how a local whisper.cpp build gets the one format it reads
- * without putting an audio converter on the Host.
- * @module @deepseek-ai/dsh-client-ui-voice/client/recorder
- */
 
 /** One finished recording, ready for the transcription endpoint. */
 export interface RecordedClip {
@@ -60,6 +60,44 @@ export class RecorderError extends Error {
   }
 }
 
+/** Why capture ended on its own rather than by a gesture. */
+export type AutoStopReason = 'silence' | 'limit'
+
+/** What the caller must tell the recorder before it can pick a format. */
+export interface RecordingRequest {
+  /** Media types the mounted provider accepts; empty means it narrows nothing. */
+  readonly accepted: readonly string[]
+  /** Hard stop for the recording, enforced by the recorder itself. */
+  readonly maxMs: number
+  /** Specific input device, or undefined for the system default. */
+  readonly deviceId?: string
+  /** End capture after this much continuous near-silence; undefined disables it. */
+  readonly silenceStopMs?: number
+  /** Emit a provisional cumulative clip this often; undefined disables it. */
+  readonly liveIntervalMs?: number
+  /**
+   * Current input loudness, 0–1, roughly 20 times a second. Purely for display: the caller must not
+   * infer speech from it, because the silence decision already lives here.
+   */
+  readonly onLevel?: (level: number) => void
+  /**
+   * A cumulative clip covering everything captured so far, for provisional transcription. Fired only
+   * when {@link liveIntervalMs} is set.
+   */
+  readonly onInterim?: (clip: RecordedClip) => void
+  /** Capture ended on its own; the caller still calls {@link RecordingSession.stop}. */
+  readonly onAutoStop?: (reason: AutoStopReason) => void
+}
+
+/**
+ * Loudness below which a frame counts as silence. Chosen against normalized RMS of 8-bit
+ * time-domain samples: room tone on a laptop mic sits well under this, speech well over.
+ */
+const SILENCE_LEVEL = 0.02
+
+/** How often loudness is sampled. Fast enough to look live, slow enough to stay off the main thread. */
+const METER_INTERVAL_MS = 50
+
 /**
  * Decode a recorded blob and re-encode it as 16 kHz mono WAV. Resampling and downmixing both happen
  * inside one `OfflineAudioContext` render, so no sample-rate maths lives here.
@@ -83,22 +121,12 @@ async function toWav(blob: Blob): Promise<Uint8Array<ArrayBuffer>> {
   }
 }
 
-/** What the caller must tell the recorder before it can pick a format. */
-export interface RecordingRequest {
-  /** Media types the mounted provider accepts; empty means it narrows nothing. */
-  readonly accepted: readonly string[]
-  /** Hard stop for the recording, enforced by the recorder itself. */
-  readonly maxMs: number
-  /** Specific input device, or undefined for the system default. */
-  readonly deviceId?: string
-}
-
 /**
  * Open the microphone and begin recording.
  *
  * The returned session owns the media stream: both `stop()` and `cancel()` release it, and the
  * caller must call one of them or the microphone indicator stays lit.
- * @param request - accepted formats, the hard recording cap, and an optional device.
+ * @param request - accepted formats, bounds, device, and the display callbacks.
  * @returns the live session.
  */
 export async function startRecording(request: RecordingRequest): Promise<RecordingSession> {
@@ -137,37 +165,97 @@ export async function startRecording(request: RecordingRequest): Promise<Recordi
     if (event.data.size > 0) chunks.push(event.data)
   })
   const startedAt = performance.now()
-  recorder.start()
 
-  const release = (): void => {
-    for (const track of stream.getTracks()) track.stop()
+  /** Encode whatever has been captured so far into the provider's format. */
+  const encode = async (durationMs: number): Promise<RecordedClip> => {
+    const blob = new Blob(chunks, { type: container })
+    if (blob.size === 0) throw new RecorderError('empty-recording', 'the recording captured no audio')
+    const bytes = wantsWav ? await toWav(blob) : new Uint8Array(await blob.arrayBuffer())
+    return { base64: toBase64(bytes), mimeType: wantsWav ? 'audio/wav' : bareMediaType(container), durationMs }
   }
-  const cap = setTimeout(() => {
+
+  // The meter also owns the silence decision, so loudness is measured once and read twice.
+  const audio = new AudioContext()
+  const analyser = audio.createAnalyser()
+  analyser.fftSize = 1024
+  audio.createMediaStreamSource(stream).connect(analyser)
+  const frame = new Uint8Array(analyser.fftSize)
+  let quietMs = 0
+  let heardSpeech = false
+  let ended: AutoStopReason | undefined
+
+  const finish = (reason: AutoStopReason): void => {
+    if (ended !== undefined) return
+    ended = reason
     if (recorder.state === 'recording') recorder.stop()
-  }, request.maxMs)
+    request.onAutoStop?.(reason)
+  }
+
+  const meter = setInterval(() => {
+    analyser.getByteTimeDomainData(frame)
+    let sum = 0
+    for (const sample of frame) {
+      const centred = (sample - 128) / 128
+      sum += centred * centred
+    }
+    const level = Math.sqrt(sum / frame.length)
+    request.onLevel?.(Math.min(1, level * 4))
+    if (level >= SILENCE_LEVEL) {
+      heardSpeech = true
+      quietMs = 0
+      return
+    }
+    // Silence only ends a recording that has heard something: otherwise a slow start would cut the
+    // person off before their first word.
+    if (!heardSpeech || request.silenceStopMs === undefined) return
+    quietMs += METER_INTERVAL_MS
+    if (quietMs >= request.silenceStopMs) finish('silence')
+  }, METER_INTERVAL_MS)
+
+  const cap = setTimeout(() => { finish('limit') }, request.maxMs)
+
+  // A cumulative pass, because a compressed stream's later chunks are not independently decodable.
+  // Overlapping passes are skipped rather than queued: a slow provider must not build a backlog.
+  let interimBusy = false
+  const interim = request.liveIntervalMs === undefined || request.onInterim === undefined
+    ? undefined
+    : setInterval(() => {
+      if (interimBusy || chunks.length === 0 || ended !== undefined) return
+      interimBusy = true
+      void encode(Math.round(performance.now() - startedAt))
+        .then((clip) => { if (ended === undefined) request.onInterim?.(clip) })
+        .catch(() => {
+          // A provisional pass that cannot encode yet is not a failure the person needs to see; the
+          // next tick tries again and the final clip is produced by stop().
+        })
+        .finally(() => { interimBusy = false })
+    }, request.liveIntervalMs)
+
+  // `timeslice` is what makes chunks arrive DURING the recording; without it the whole recording
+  // lands in one blob at stop and no interim pass could ever see anything.
+  recorder.start(request.liveIntervalMs === undefined ? undefined : Math.min(1000, request.liveIntervalMs))
 
   const settled = new Promise<void>((resolve) => {
-    recorder.addEventListener('stop', () =>{  resolve() }, { once: true })
+    recorder.addEventListener('stop', () => resolve(), { once: true })
   })
+
+  const release = (): void => {
+    clearInterval(meter)
+    clearTimeout(cap)
+    if (interim !== undefined) clearInterval(interim)
+    void audio.close()
+    for (const track of stream.getTracks()) track.stop()
+  }
 
   return {
     async stop(): Promise<RecordedClip> {
-      clearTimeout(cap)
       if (recorder.state === 'recording') recorder.stop()
       await settled
       release()
-      const durationMs = Math.round(performance.now() - startedAt)
-      const blob = new Blob(chunks, { type: container })
-      if (blob.size === 0) throw new RecorderError('empty-recording', 'the recording captured no audio')
-      const bytes = wantsWav ? await toWav(blob) : new Uint8Array(await blob.arrayBuffer())
-      return {
-        base64: toBase64(bytes),
-        mimeType: wantsWav ? 'audio/wav' : bareMediaType(container),
-        durationMs,
-      }
+      return encode(Math.round(performance.now() - startedAt))
     },
     cancel(): void {
-      clearTimeout(cap)
+      ended = ended ?? 'limit'
       if (recorder.state === 'recording') recorder.stop()
       release()
     },

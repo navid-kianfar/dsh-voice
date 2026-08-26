@@ -13,7 +13,19 @@ const _deepseek_ai_dsh_voice_voice_describe_result$schema = z.object({
   'interactionMode': z.union([z.literal("toggle"), z.literal("hold")]).readonly(),
   'insertMode': z.union([z.literal("append"), z.literal("replace")]).readonly(),
   'language': z.string().readonly().optional(),
+  'polish': z.boolean().readonly(),
+  'silenceStopMs': z.number().readonly().optional(),
+  'liveIntervalMs': z.number().readonly().optional(),
 })
+const _deepseek_ai_dsh_voice_voice_polish_parameter_0$schema = z.string()
+const _deepseek_ai_dsh_voice_voice_polish_result$schema = z.union([z.object({
+  'ok': z.literal(true).readonly(),
+  'text': z.string().readonly(),
+}), z.object({
+  'ok': z.literal(false).readonly(),
+  'code': z.union([z.literal("no-model"), z.literal("llm-failed")]).readonly(),
+  'message': z.string().readonly(),
+})])
 const _deepseek_ai_dsh_voice_voice_transcribe_parameter_0$schema = z.object({
   'audioBase64': z.string().readonly(),
   'mimeType': z.string().readonly(),
@@ -48,7 +60,33 @@ export const TYPERT = {
         typeSymbol: '../src/host/types.ts#VoiceCapabilityView',
         schema: _deepseek_ai_dsh_voice_voice_describe_result$schema,
       },
-      sourceLocation: {"file":"packages/voice/voice/src/index.ts","line":96,"column":9},
+      sourceLocation: {"file":"packages/voice/voice/src/index.ts","line":93,"column":9},
+    },
+    {
+      id: '@achasoft/dsh-voice#voice/polish',
+      service: 'voice',
+      namespace: 'voice',
+      method: 'polish',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'text',
+          wire: 'text',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: '@achasoft/dsh-voice#voice/polish:text',
+            schema: _deepseek_ai_dsh_voice_voice_polish_parameter_0$schema,
+          },
+        },
+      ],
+      cancellation: { parameter: 'signal' },
+      result: {
+        mode: 'strict',
+        typeSymbol: '../src/host/types.ts#VoicePolishResult',
+        schema: _deepseek_ai_dsh_voice_voice_polish_result$schema,
+      },
+      sourceLocation: {"file":"packages/voice/voice/src/index.ts","line":177,"column":9},
     },
     {
       id: '@achasoft/dsh-voice#voice/transcribe',
@@ -100,12 +138,19 @@ export const TYPERT = {
             "signature": "@Remote('transcribe') async transcribe(request: VoiceTranscribeRequest, signal: AbortSignal): Promise<VoiceTranscribeResult>",
             "summary": "Transcribe one uploaded recording.",
             "jsDoc": "/**\n * Transcribe one uploaded recording.\n *\n * Every failure is returned rather than thrown: the gateway erases a business exception's\n * classification, and the browser's next action depends on which class it was.\n * @param request - the base64 clip and its media type.\n * @param signal - gateway-supplied cancellation for the caller's abandoned request.\n * @returns the transcript, or a classified failure.\n */"
+          },
+          {
+            "kind": "method",
+            "name": "polish",
+            "signature": "@Remote('polish') async polish(text: string, signal: AbortSignal): Promise<VoicePolishResult>",
+            "summary": "Clean up one transcript with the session's own model.",
+            "jsDoc": "/**\n * Clean up one transcript with the session's own model.\n *\n * Reuses whatever model the deployment already configured, so dictation needs no second\n * credential and no second provider. Failures are returned rather than thrown: the caller still\n * has the raw transcript, and losing the cleanup is not losing the dictation.\n * @param text - the raw transcript.\n * @param signal - gateway-supplied cancellation.\n * @returns the cleaned text, or a classified failure.\n */"
           }
         ],
         "types": [
           {
             "name": "VoiceCapabilityView",
-            "declaration": "export interface VoiceCapabilityView {\n    readonly available: boolean;\n    readonly provider?: string;\n    readonly model?: string;\n    readonly ready: boolean;\n    readonly detail?: string;\n    readonly acceptedMediaTypes: readonly string[];\n    readonly maxClipSeconds: number;\n    readonly maxClipBytes: number;\n    readonly interactionMode: VoiceInteractionMode;\n    readonly insertMode: VoiceInsertMode;\n    readonly language?: string;\n}"
+            "declaration": "export interface VoiceCapabilityView {\n    readonly available: boolean;\n    readonly provider?: string;\n    readonly model?: string;\n    readonly ready: boolean;\n    readonly detail?: string;\n    readonly acceptedMediaTypes: readonly string[];\n    readonly maxClipSeconds: number;\n    readonly maxClipBytes: number;\n    readonly interactionMode: VoiceInteractionMode;\n    readonly insertMode: VoiceInsertMode;\n    readonly language?: string;\n    readonly polish: boolean;\n    readonly silenceStopMs?: number;\n    readonly liveIntervalMs?: number;\n}"
           },
           {
             "name": "VoiceFailureCode",
@@ -118,6 +163,18 @@ export const TYPERT = {
           {
             "name": "VoiceInteractionMode",
             "declaration": "export type VoiceInteractionMode = 'toggle' | 'hold';"
+          },
+          {
+            "name": "VoicePolishFailure",
+            "declaration": "export interface VoicePolishFailure {\n    readonly ok: false;\n    readonly code: 'no-model' | 'llm-failed';\n    readonly message: string;\n}"
+          },
+          {
+            "name": "VoicePolishResult",
+            "declaration": "export type VoicePolishResult = VoicePolishSuccess | VoicePolishFailure;"
+          },
+          {
+            "name": "VoicePolishSuccess",
+            "declaration": "export interface VoicePolishSuccess {\n    readonly ok: true;\n    readonly text: string;\n}"
           },
           {
             "name": "VoiceTranscribeFailure",

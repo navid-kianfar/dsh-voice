@@ -4,6 +4,8 @@ Voice input for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-h
 
 Transcription is a swappable capability. Ship it against a hosted Whisper API, a Whisper server on your own machine, or a local `whisper.cpp` binary with no network at all.
 
+**What makes a dictation usable, not just possible:** the transcript is cleaned up by the model you already configured — fillers gone, punctuation restored, spoken enumerations turned into lists. Recording stops when you stop talking. A live level meter shows it is hearing you, and an optional provisional transcript appears while you speak. Text you type mid-dictation is never overwritten.
+
 ## Requirements
 
 - A dsh installation with the Web Client (`@deepseek-ai/dsh-web-app`).
@@ -97,6 +99,16 @@ The **Voice input** card on the plugin settings tab edits these live; the values
 | `maxClipSeconds` | `120` | Longest recording the browser will make. |
 | `maxClipBytes` | `26214400` | Largest clip the Host accepts (25 MiB, the hosted API's ceiling). |
 | `language` | *(unset)* | BCP-47 hint. Blank asks the provider to detect the language. |
+| `polish` | `true` | Clean the transcript with the session's own model — no second credential. |
+| `polishPrompt` | *(unset)* | Custom cleanup instruction. Blank uses the built-in one, which is deliberately conservative: it rewrites nothing it was not asked to. |
+| `silenceStopMs` | `2500` | End the recording after this much continuous silence. Blank disables it. |
+| `liveIntervalMs` | *(unset)* | Show a provisional transcript this often while recording. **Each pass re-transcribes from the beginning** — cheap against a local binary, billed per pass against a hosted endpoint, which is why it is opt-in. |
+
+The **microphone** is chosen in the card too, but stored in the browser rather than the settings document: which input device to use is a fact about the machine, not the account.
+
+### Polish uses your model, not another key
+
+Cleanup runs through `ctx.llm` with the model your deployment already selected, so it needs no extra provider and no extra credential. A failed cleanup is never a failed dictation — the raw transcript is always what lands if the model request fails.
 
 `maxClipSeconds` is the browser's gate and `maxClipBytes` is the Host's — the Host cannot measure a duration without decoding the audio, so the two limits exist for different reasons.
 
@@ -164,9 +176,8 @@ On a fresh clone pnpm may refuse esbuild's postinstall (`ERR_PNPM_IGNORED_BUILDS
 ## Known limitations
 
 - **No streaming or partial transcripts.** The RPC gateway dispatches unary methods only, so a clip is transcribed after you stop recording. Live partials need a different transport.
-- **No voice activity detection.** Recording stops when you stop it or when `maxClipSeconds` elapses.
+- **Provisional transcripts re-transcribe from the start.** A compressed stream's later chunks are not independently decodable, so each live pass covers the whole clip. That is why `liveIntervalMs` is opt-in rather than a default.
 - **Web Client only.** The terminal CLI has no capture path; adding one means a host-side recorder and an external binary.
-- **System default microphone.** No device picker yet — the browser's default input is used.
 - **One provider at a time.** No runtime selection among several, and no fallback from a remote provider to a local one.
 - **`describe()` checks the whisper.cpp binary, not the model.** A missing or corrupt `modelPath` surfaces on the first real call, because verifying it means loading it.
 

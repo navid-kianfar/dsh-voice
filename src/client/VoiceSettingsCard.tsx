@@ -16,7 +16,12 @@ export type VoiceSettingsCardProps =
   & InjectFace<VoiceSettingsInjected>
 
 /** Fields a person edits here; the rest of the section is deployment-owned. */
-type Editable = Pick<VoiceSettings, 'interactionMode' | 'insertMode' | 'maxClipSeconds' | 'language'>
+type Editable = Pick<VoiceSettings,
+  'interactionMode' | 'insertMode' | 'maxClipSeconds' | 'language'
+  | 'polish' | 'polishPrompt' | 'silenceStopMs' | 'liveIntervalMs'>
+
+/** Optional whole-millisecond fields: blank clears them rather than storing a zero. */
+const OPTIONAL_MS: readonly (keyof Editable)[] = ['silenceStopMs', 'liveIntervalMs']
 
 /** Staged edits, keyed by field; absent means "unchanged from the resolved value". */
 type Draft = Partial<Record<keyof Editable, string>>
@@ -55,13 +60,24 @@ function secondsInvalid(text: string): boolean {
  * neighbouring cards use.
  */
 export function VoiceSettingsCard(props: VoiceSettingsCardProps) {
-  const { t, setField, unsetField, describeVoice } = props
+  const { t, setField, unsetField, describeVoice, listDevices, readDevice, writeDevice } = props
   const settings = props.useVoiceSettings(snapshot => snapshot)
   const [capability, setCapability] = useState<VoiceCapabilityView | null>(null)
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState<Draft>({})
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState(false)
+  const [devices, setDevices] = useState<readonly MediaDeviceInfo[]>([])
+  const [device, setDevice] = useState<string | undefined>(readDevice)
+
+  useEffect(() => {
+    let alive = true
+    void listDevices().then((found) => { if (alive) setDevices(found) }, () => {
+      // Enumeration is unavailable outside a secure context and before the first grant; the picker
+      // then offers only the system default, which is exactly what the recorder will use.
+    })
+    return () => { alive = false }
+  }, [listDevices])
 
   useEffect(() => {
     let alive = true
@@ -83,7 +99,12 @@ export function VoiceSettingsCard(props: VoiceSettingsCardProps) {
   const changed = (Object.keys(draft) as (keyof Editable)[])
     .filter(field => draft[field] !== shown({}, value, field))
   const dirty = changed.length > 0
+  const msInvalid = (field: keyof Editable): boolean => {
+    const text = shown(draft, value, field)
+    return text !== '' && secondsInvalid(text)
+  }
   const invalid = secondsInvalid(shown(draft, value, 'maxClipSeconds'))
+    || msInvalid('silenceStopMs') || msInvalid('liveIntervalMs')
   const writable = settings.writable && value !== undefined
 
   const save = (): void => {
@@ -95,9 +116,12 @@ export function VoiceSettingsCard(props: VoiceSettingsCardProps) {
       (queue, field) => queue.then(() => {
         const text = draft[field] ?? ''
         if (field === 'maxClipSeconds') return setField(field, Number(text))
-        // A blank optional field is CLEARED, not stored as an empty string: an empty `language`
-        // would read as configured-but-empty rather than "detect the language".
-        if (field === 'language' && text === '') return unsetField(field)
+        if (field === 'polish') return setField(field, text === 'true')
+        // A blank optional field is CLEARED, not stored empty: an empty `language` would read as
+        // configured-but-empty rather than "detect the language", and a 0 ms silence bound would
+        // read as "stop immediately" rather than "do not stop on silence".
+        if (OPTIONAL_MS.includes(field)) return text === '' ? unsetField(field) : setField(field, Number(text))
+        if ((field === 'language' || field === 'polishPrompt') && text === '') return unsetField(field)
         return setField(field, text)
       }),
       Promise.resolve(),
@@ -190,6 +214,80 @@ export function VoiceSettingsCard(props: VoiceSettingsCardProps) {
                 onChange={(event) => { edit('maxClipSeconds', event.target.value) }}
               />
               {invalid ? <p className={css.invalid} role="status">{t('settings.invalidNumber')}</p> : null}
+            </label>
+
+            <label className={css.field}>
+              <div className={css.head}><span className={css.label}>{t('settings.polish')}</span></div>
+              <select
+                className={css.select}
+                disabled={!writable}
+                value={shown(draft, value, 'polish')}
+                onChange={(event) => { edit('polish', event.target.value) }}
+              >
+                <option value="true">{t('settings.polish.on')}</option>
+                <option value="false">{t('settings.polish.off')}</option>
+              </select>
+            </label>
+
+            {shown(draft, value, 'polish') === 'true' ? (
+              <label className={css.field}>
+                <div className={css.head}><span className={css.label}>{t('settings.polishPrompt')}</span></div>
+                <input
+                  className={css.control}
+                  type="text"
+                  disabled={!writable}
+                  value={shown(draft, value, 'polishPrompt')}
+                  onChange={(event) => { edit('polishPrompt', event.target.value) }}
+                />
+              </label>
+            ) : null}
+
+            <label className={css.field}>
+              <div className={css.head}><span className={css.label}>{t('settings.silenceStop')}</span></div>
+              <input
+                className={msInvalid('silenceStopMs') ? css.controlInvalid : css.control}
+                type="number"
+                min={1}
+                disabled={!writable}
+                value={shown(draft, value, 'silenceStopMs')}
+                onChange={(event) => { edit('silenceStopMs', event.target.value) }}
+              />
+            </label>
+
+            <label className={css.field}>
+              <div className={css.head}><span className={css.label}>{t('settings.liveInterval')}</span></div>
+              <input
+                className={msInvalid('liveIntervalMs') ? css.controlInvalid : css.control}
+                type="number"
+                min={1}
+                disabled={!writable}
+                value={shown(draft, value, 'liveIntervalMs')}
+                onChange={(event) => { edit('liveIntervalMs', event.target.value) }}
+              />
+              <p className={css.hint}>{t('settings.liveInterval.hint')}</p>
+            </label>
+
+            {/* The device is browser-local, so it writes through on change rather than joining the
+                staged form: there is no revision to fence and nothing to save. */}
+            <label className={css.field}>
+              <div className={css.head}><span className={css.label}>{t('settings.device')}</span></div>
+              <select
+                className={css.select}
+                value={device ?? ''}
+                onChange={(event) => {
+                  const next = event.target.value === '' ? undefined : event.target.value
+                  setDevice(next)
+                  writeDevice(next)
+                }}
+              >
+                <option value="">{t('settings.device.default')}</option>
+                {devices.map((input, index) => (
+                  <option key={input.deviceId} value={input.deviceId}>
+                    {input.label === '' ? `${t('settings.device.unnamed')} ${index + 1}` : input.label}
+                  </option>
+                ))}
+              </select>
+              <p className={css.hint}>{t('settings.device.hint')}</p>
             </label>
 
             <label className={css.field}>

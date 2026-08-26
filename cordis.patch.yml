@@ -21,6 +21,16 @@
         maxClipBytes: 26214400
         interactionMode: toggle
         insertMode: append
+        # Dictation is speech, not prose. The session's own model removes fillers, restores
+        # punctuation, and turns spoken enumerations into lists — no second credential involved.
+        polish: true
+        # Stop when the speaker stops, rather than making them reach for the button. Well above a
+        # natural between-sentence pause, so it ends a dictation without truncating one.
+        silenceStopMs: 2500
+        # Provisional in-progress transcripts are OFF by default: each pass re-transcribes from the
+        # beginning, which is cheap against a local binary and billed per pass against a hosted one.
+        # Set it (2000 is comfortable) when running the whisper-cpp provider.
+        # liveIntervalMs: 2000
 
     # The BARE package name, deliberately: the Web Client discovers a browser half
     # by resolving `<row name>/package.json`, so a subpath row here would leave the

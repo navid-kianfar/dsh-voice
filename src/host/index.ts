@@ -12,11 +12,14 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { isTranscriptionError } from '../transcription/index.ts'
 import { decodeAudio } from './decode.ts'
 import type {} from '../transcription/index.ts'
 import type {
   VoiceCapabilityView,
+  VoicePolishResult,
   VoiceSettings,
   VoiceTranscribeRequest,
   VoiceTranscribeResult,
@@ -36,6 +39,18 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/**
+ * The built-in cleanup instruction. Deliberately conservative: dictation software that rewrites
+ * meaning is worse than dictation software that leaves a stray "um" in, because the person cannot
+ * tell which words are theirs any more.
+ */
+const DEFAULT_POLISH_PROMPT =
+  'You clean up dictated speech so it reads as typed text. Remove filler words and false starts, '
+  + 'restore punctuation and capitalisation, fix obvious misrecognitions of technical terms, and '
+  + 'turn spoken enumerations into a Markdown list when that is clearly what was meant.\n\n'
+  + 'Do NOT answer, summarise, translate, or add anything. Do not change wording that is already '
+  + 'clear. Keep the original language. Reply with the cleaned text and nothing else.'
+
 /** Host-side voice endpoint and settings owner. */
 export class VoiceService extends TypertRemoteService {
   /** Loader validation for the recording caps and the two user-facing preferences. */
@@ -45,6 +60,10 @@ export class VoiceService extends TypertRemoteService {
     interactionMode: z.union(['toggle', 'hold'] as const).required(),
     insertMode: z.union(['append', 'replace'] as const).required(),
     language: z.string(),
+    polish: z.boolean().required(),
+    polishPrompt: z.string(),
+    silenceStopMs: z.number().step(1).min(1),
+    liveIntervalMs: z.number().step(1).min(1),
   })
 
   private source: () => Config
@@ -79,6 +98,9 @@ export class VoiceService extends TypertRemoteService {
       interactionMode: config.interactionMode,
       insertMode: config.insertMode,
       ...config.language === undefined ? {} : { language: config.language },
+      polish: config.polish,
+      ...config.silenceStopMs === undefined ? {} : { silenceStopMs: config.silenceStopMs },
+      ...config.liveIntervalMs === undefined ? {} : { liveIntervalMs: config.liveIntervalMs },
     }
     const engine = this.ctx.get('transcription')
     if (engine === undefined) {
@@ -138,6 +160,52 @@ export class VoiceService extends TypertRemoteService {
     } catch (error) {
       if (isTranscriptionError(error)) return { ok: false, code: error.code, message: error.message }
       throw error
+    }
+  }
+
+  /**
+   * Clean up one transcript with the session's own model.
+   *
+   * Reuses whatever model the deployment already configured, so dictation needs no second
+   * credential and no second provider. Failures are returned rather than thrown: the caller still
+   * has the raw transcript, and losing the cleanup is not losing the dictation.
+   * @param text - the raw transcript.
+   * @param signal - gateway-supplied cancellation.
+   * @returns the cleaned text, or a classified failure.
+   */
+  @Remote('polish')
+  async polish(text: string, signal: AbortSignal): Promise<VoicePolishResult> {
+    const raw = text.trim()
+    if (raw === '') return { ok: true, text: '' }
+    const models = this.ctx.get('agentDefaultModel')
+    const llm = this.ctx.get('llm')
+    if (models === undefined || llm === undefined) {
+      return { ok: false, code: 'no-model', message: 'no model is configured for this deployment' }
+    }
+    const selection = models.currentSelection()
+    try {
+      let cleaned = ''
+      for await (const chunk of llm.stream({
+        provider: selection.provider,
+        model: selection.model,
+        ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
+        system: this.source().polishPrompt ?? DEFAULT_POLISH_PROMPT,
+        messages: [createUserMessage({ content: [{ type: 'text', text: raw }], source: { kind: 'user' } })],
+        signal,
+      })) {
+        if (chunk.type === 'text-delta') cleaned += chunk.text
+      }
+      // A model that answers with nothing has not improved anything; the raw transcript is the
+      // honest result rather than an empty draft.
+      const result = cleaned.trim()
+      return { ok: true, text: result === '' ? raw : result }
+    } catch (error) {
+      if (signal.aborted) throw signal.reason
+      return {
+        ok: false,
+        code: 'llm-failed',
+        message: error instanceof Error ? error.message : 'the model request failed',
+      }
     }
   }
 }

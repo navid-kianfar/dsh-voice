@@ -15,6 +15,9 @@ importers:
       '@deepseek-ai/cordis':
         specifier: link:../../deepseek-harness/vendor/cordis
         version: link:../../deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-agent-default-model':
+        specifier: link:../../deepseek-harness/packages/core/agent-default-model
+        version: link:../../deepseek-harness/packages/core/agent-default-model
       '@deepseek-ai/dsh-api-remotes':
         specifier: link:../../deepseek-harness/packages/api/remotes
         version: link:../../deepseek-harness/packages/api/remotes
@@ -42,6 +45,9 @@ importers:
       '@deepseek-ai/dsh-credentials':
         specifier: link:../../deepseek-harness/packages/credentials/credentials
         version: link:../../deepseek-harness/packages/credentials/credentials
+      '@deepseek-ai/dsh-llm':
+        specifier: link:../../deepseek-harness/packages/llm/llm
+        version: link:../../deepseek-harness/packages/llm/llm
       '@deepseek-ai/dsh-settings':
         specifier: link:../../deepseek-harness/packages/settings/settings
         version: link:../../deepseek-harness/packages/settings/settings

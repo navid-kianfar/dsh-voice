@@ -98,7 +98,37 @@ export interface VoiceCapabilityView {
   readonly insertMode: VoiceInsertMode
   /** BCP-47 language hint passed to the provider; absent asks the provider to detect. */
   readonly language?: string
+  /** Whether a transcript is cleaned up by the session's model before it reaches the draft. */
+  readonly polish: boolean
+  /** Continuous silence that ends a recording; absent leaves the duration cap as the only bound. */
+  readonly silenceStopMs?: number
+  /** Interval for provisional in-progress transcripts; absent disables them. */
+  readonly liveIntervalMs?: number
 }
+
+/** A transcript the session's model rewrote. */
+export interface VoicePolishSuccess {
+  readonly ok: true
+  /** The cleaned-up text. */
+  readonly text: string
+}
+
+/** Why a cleanup could not run. Carried as a value for the same reason transcription failures are. */
+export interface VoicePolishFailure {
+  readonly ok: false
+  /** `no-model` when no model is selected, `llm-failed` when the request itself failed. */
+  readonly code: 'no-model' | 'llm-failed'
+  /** Operator-facing diagnostic; never a secret. */
+  readonly message: string
+}
+
+/**
+ * Result of one cleanup attempt.
+ *
+ * A failure is never fatal to dictation: the caller keeps the raw transcript, which is always
+ * usable. Cleanup is an improvement, not a dependency.
+ */
+export type VoicePolishResult = VoicePolishSuccess | VoicePolishFailure
 
 /**
  * The `voice` settings section as both halves see it: the Host validates it as its plugin `Config`,
@@ -119,4 +149,29 @@ export interface VoiceSettings {
   insertMode: VoiceInsertMode
   /** BCP-47 hint passed to the provider; omit to let the provider detect the language. */
   language?: string
+  /**
+   * Run the raw transcript through the session's own model to remove fillers, restore punctuation,
+   * and turn spoken enumerations into lists. Dictation is speech, not prose; this is what makes it
+   * read like something a person typed.
+   */
+  polish: boolean
+  /**
+   * System prompt for that cleanup. Absent uses the built-in one, which is deliberately conservative
+   * — it rewrites nothing it was not asked to.
+   */
+  polishPrompt?: string
+  /**
+   * Stop recording after this much continuous silence. Absent disables it, leaving
+   * {@link VoiceSettings.maxClipSeconds} as the only bound.
+   */
+  silenceStopMs?: number
+  /**
+   * While recording, re-transcribe what has been captured so far every this many milliseconds and
+   * show it as provisional text. Absent disables it.
+   *
+   * Each pass transcribes the clip from the beginning, because a compressed stream's later chunks
+   * are not independently decodable. That is cheap against a local binary and BILLED PER PASS
+   * against a hosted endpoint, which is why it is opt-in rather than a default.
+   */
+  liveIntervalMs?: number
 }

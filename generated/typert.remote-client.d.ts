@@ -3,15 +3,17 @@ import type {
   RemoteResult,
   TypertRemoteContribution,
 } from '@deepseek-ai/dsh-typert-protocol'
-import type { VoiceCapabilityView, VoiceTranscribeRequest, VoiceTranscribeResult } from '../src/host/types.ts'
+import type { VoiceCapabilityView, VoicePolishResult, VoiceTranscribeRequest, VoiceTranscribeResult } from '../src/host/types.ts'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$766f696365 {
     describe: () => Promise<RemoteResult<VoiceCapabilityView>>
+    polish: (text: string, signal?: AbortSignal) => Promise<RemoteResult<VoicePolishResult>>
     transcribe: (request: VoiceTranscribeRequest, signal?: AbortSignal) => Promise<RemoteResult<VoiceTranscribeResult>>
   }
   interface TypertRemoteMap {
     'voice/describe': () => Promise<RemoteResult<VoiceCapabilityView>>
+    'voice/polish': (text: string, signal?: AbortSignal) => Promise<RemoteResult<VoicePolishResult>>
     'voice/transcribe': (request: VoiceTranscribeRequest, signal?: AbortSignal) => Promise<RemoteResult<VoiceTranscribeResult>>
   }
   interface TypertRemoteNamespaceMap {

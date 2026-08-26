@@ -25,10 +25,13 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 // than adding a row to the curated api-remotes assembly — is what keeps the capability a plugin: the
 // namespace mounts and unmounts with this fiber, and no shipped source names `voice`.
 import voiceRemote from '../../generated/typert.remote-client.js'
-import type { VoiceCapabilityView, VoiceSettings, VoiceTranscribeResult } from '../host/types.ts'
+import type {
+  VoiceCapabilityView, VoicePolishResult, VoiceSettings, VoiceTranscribeResult,
+} from '../host/types.ts'
 import { VoiceControl } from './VoiceControl.tsx'
 import { VoiceSettingsCard } from './VoiceSettingsCard.tsx'
-import type { RecordedClip } from './recorder.ts'
+import { listMicrophones, type RecordedClip } from './recorder.ts'
+import { readDevice, writeDevice } from './device.ts'
 import { en, zh, type VoiceKey } from './locales.ts'
 
 export type { VoiceKey } from './locales.ts'
@@ -60,6 +63,17 @@ export interface VoiceControlInjected {
    * @returns the transcript, or a classified failure carried as a value.
    */
   transcribe: (clip: RecordedClip) => Promise<VoiceTranscribeResult>
+  /**
+   * Clean up one transcript with the session's model.
+   * @param text - the raw transcript.
+   * @returns the cleaned text, or a classified failure the caller ignores in favour of the raw text.
+   */
+  polish: (text: string) => Promise<VoicePolishResult>
+  /**
+   * The microphone this machine is set to record from.
+   * @returns the stored device id, or undefined for the system default.
+   */
+  readDevice: () => string | undefined
 }
 
 /** Injected business face of the voice settings card. */
@@ -81,6 +95,21 @@ export interface VoiceSettingsInjected {
    * @returns settlement after the write.
    */
   setField: (field: string, value: unknown) => Promise<void>
+  /**
+   * List the input devices this browser will name.
+   * @returns the available microphones; empty when enumeration is unavailable.
+   */
+  listDevices: () => Promise<readonly MediaDeviceInfo[]>
+  /**
+   * The microphone this machine records from.
+   * @returns the stored device id, or undefined for the system default.
+   */
+  readDevice: () => string | undefined
+  /**
+   * Choose the microphone for this machine only; it never reaches the settings document.
+   * @param deviceId - the device to use, or undefined for the system default.
+   */
+  writeDevice: (deviceId: string | undefined) => void
   /**
    * Clear one optional field back to the composition layer. A blank optional field is cleared
    * rather than stored empty, so it reads as unset instead of configured-but-empty.
@@ -136,13 +165,14 @@ function surface(ctx: ClientContext): void {
   const describeVoice = (): Promise<VoiceCapabilityView> => ctx.remote.voice.describe().then(unwrap)
   const transcribe = (clip: RecordedClip): Promise<VoiceTranscribeResult> =>
     ctx.remote.voice.transcribe({ audioBase64: clip.base64, mimeType: clip.mimeType }).then(unwrap)
+  const polish = (text: string): Promise<VoicePolishResult> => ctx.remote.voice.polish(text).then(unwrap)
 
   ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
     name: 'conversation.input.left',
     // List seats are addressed by id; the seat orders itself after the resident chrome.
     id: 'voice',
     locale: NS,
-    inject: (): VoiceControlInjected => ({ describeVoice, transcribe }),
+    inject: (): VoiceControlInjected => ({ describeVoice, transcribe, polish, readDevice }),
   }, VoiceControl))
 
   const scope = ctx.settingsScope.bind<VoiceSettings>({ namespace: NS })
@@ -155,6 +185,9 @@ function surface(ctx: ClientContext): void {
       describeVoice,
       setField: (field, value) => scope.set(field, value),
       unsetField: field => scope.unset(field),
+      listDevices: listMicrophones,
+      readDevice,
+      writeDevice,
     }),
   }, VoiceSettingsCard))
 }

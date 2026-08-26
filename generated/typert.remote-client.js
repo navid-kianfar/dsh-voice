@@ -13,7 +13,19 @@ const _deepseek_ai_dsh_voice_voice_describe_result$schema = z.object({
   'interactionMode': z.union([z.literal("toggle"), z.literal("hold")]).readonly(),
   'insertMode': z.union([z.literal("append"), z.literal("replace")]).readonly(),
   'language': z.string().readonly().optional(),
+  'polish': z.boolean().readonly(),
+  'silenceStopMs': z.number().readonly().optional(),
+  'liveIntervalMs': z.number().readonly().optional(),
 })
+const _deepseek_ai_dsh_voice_voice_polish_parameter_0$schema = z.string()
+const _deepseek_ai_dsh_voice_voice_polish_result$schema = z.union([z.object({
+  'ok': z.literal(true).readonly(),
+  'text': z.string().readonly(),
+}), z.object({
+  'ok': z.literal(false).readonly(),
+  'code': z.union([z.literal("no-model"), z.literal("llm-failed")]).readonly(),
+  'message': z.string().readonly(),
+})])
 const _deepseek_ai_dsh_voice_voice_transcribe_parameter_0$schema = z.object({
   'audioBase64': z.string().readonly(),
   'mimeType': z.string().readonly(),
@@ -45,7 +57,33 @@ export const TYPERT_REMOTE = {
         typeSymbol: '../src/host/types.ts#VoiceCapabilityView',
         schema: _deepseek_ai_dsh_voice_voice_describe_result$schema,
       },
-      sourceLocation: {"file":"packages/voice/voice/src/index.ts","line":96,"column":9},
+      sourceLocation: {"file":"packages/voice/voice/src/index.ts","line":93,"column":9},
+    },
+    {
+      id: '@achasoft/dsh-voice#voice/polish',
+      service: 'voice',
+      namespace: 'voice',
+      method: 'polish',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'text',
+          wire: 'text',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: '@achasoft/dsh-voice#voice/polish:text',
+            schema: _deepseek_ai_dsh_voice_voice_polish_parameter_0$schema,
+          },
+        },
+      ],
+      cancellation: { parameter: 'signal' },
+      result: {
+        mode: 'strict',
+        typeSymbol: '../src/host/types.ts#VoicePolishResult',
+        schema: _deepseek_ai_dsh_voice_voice_polish_result$schema,
+      },
+      sourceLocation: {"file":"packages/voice/voice/src/index.ts","line":177,"column":9},
     },
     {
       id: '@achasoft/dsh-voice#voice/transcribe',

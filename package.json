@@ -1,6 +1,6 @@
 {
   "name": "@achasoft/dsh-voice",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Voice input for the DeepSeek Harness Web Client: a microphone control in the composer, a transcription capability seam, and two selectable providers",
   "license": "MIT",
   "type": "module",
@@ -64,7 +64,9 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent-default-model": "*",
     "@deepseek-ai/dsh-credentials": "*",
+    "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-settings": "*",
     "@deepseek-ai/dsh-subprocess": "*",
     "@deepseek-ai/dsh-typert-protocol": "*",
@@ -75,6 +77,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "link:../../deepseek-harness/vendor/cordis",
+    "@deepseek-ai/dsh-agent-default-model": "link:../../deepseek-harness/packages/core/agent-default-model",
     "@deepseek-ai/dsh-api-remotes": "link:../../deepseek-harness/packages/api/remotes",
     "@deepseek-ai/dsh-client-locale": "link:../../deepseek-harness/packages/client/locale",
     "@deepseek-ai/dsh-client-runtime": "link:../../deepseek-harness/packages/client/runtime",
@@ -84,6 +87,7 @@
     "@deepseek-ai/dsh-client-ui-settings-plugins": "link:../../deepseek-harness/packages/client/ui-settings-plugins",
     "@deepseek-ai/dsh-client-ui-slots": "link:../../deepseek-harness/packages/client/ui-slots",
     "@deepseek-ai/dsh-credentials": "link:../../deepseek-harness/packages/credentials/credentials",
+    "@deepseek-ai/dsh-llm": "link:../../deepseek-harness/packages/llm/llm",
     "@deepseek-ai/dsh-settings": "link:../../deepseek-harness/packages/settings/settings",
     "@deepseek-ai/dsh-subprocess": "link:../../deepseek-harness/packages/subprocess/subprocess",
     "@deepseek-ai/dsh-typert-protocol": "link:../../deepseek-harness/packages/typert/protocol",

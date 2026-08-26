@@ -12,8 +12,10 @@ import {
 
 const REGENERATE = 'run `node scripts/regen-typert.mjs <path-to-deepseek-harness>` and commit generated/'
 
-const declared = await declaredEndpoints()
-const generated = await generatedEndpoints()
+// Compared as SETS: the generator emits endpoints alphabetically while the source declares them in
+// whatever order reads best, and that difference is not drift.
+const declared = [...await declaredEndpoints()].sort()
+const generated = [...await generatedEndpoints()].sort()
 if (declared.join(',') !== generated.join(',')) {
   console.error(`typert: endpoints differ.\n  src/host declares: ${declared.join(', ') || '(none)'}`)
   console.error(`  generated/ carries: ${generated.join(', ') || '(none)'}\n  ${REGENERATE}`)
