@@ -142,7 +142,12 @@ const browserHalf: UserConfig = {
         minify: true,
       })
       const classMap: Record<string, string> = {}
-      for (const [local, exported] of Object.entries(cssExports ?? {})) classMap[local] = exported.name
+      for (const [local, exported] of Object.entries(cssExports ?? {})) {
+        // A `composes:` rule exports the composed base as a SEPARATE name; taking only `name` drops
+        // the base class and the element renders with just the override rules. The map value is the
+        // full class list, which is what CSS Modules means by one exported name.
+        classMap[local] = [exported.name, ...exported.composes.map(entry => entry.name)].join(' ')
+      }
       return styleModule(file, code.toString(), classMap)
     },
   }],

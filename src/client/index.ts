@@ -81,6 +81,13 @@ export interface VoiceSettingsInjected {
    * @returns settlement after the write.
    */
   setField: (field: string, value: unknown) => Promise<void>
+  /**
+   * Clear one optional field back to the composition layer. A blank optional field is cleared
+   * rather than stored empty, so it reads as unset instead of configured-but-empty.
+   * @param field - the field name inside the namespace.
+   * @returns settlement after the write.
+   */
+  unsetField: (field: string) => Promise<void>
 }
 
 /**
@@ -147,6 +154,7 @@ function surface(ctx: ClientContext): void {
       hooks: { voiceSettings: scope },
       describeVoice,
       setField: (field, value) => scope.set(field, value),
+      unsetField: field => scope.unset(field),
     }),
   }, VoiceSettingsCard))
 }

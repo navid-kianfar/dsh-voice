@@ -1,6 +1,6 @@
 {
   "name": "@achasoft/dsh-voice",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Voice input for the DeepSeek Harness Web Client: a microphone control in the composer, a transcription capability seam, and two selectable providers",
   "license": "MIT",
   "type": "module",
@@ -107,9 +107,14 @@
     "deepseek-harness",
     "dsh",
     "dsh-plugin",
-    "voice",
+    "voice-input",
     "speech-to-text",
-    "whisper"
+    "transcription",
+    "whisper",
+    "whisper-cpp",
+    "stt",
+    "dictation",
+    "cordis"
   ],
   "types": "./types/index.d.ts",
   "engines": {
