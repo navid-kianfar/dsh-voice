@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Buffer } from 'node:buffer'
-import { decodeAudio } from '../src/host/decode.ts'
+import { decodeAudio, decodedByteLength } from '../src/host/decode.ts'
 
 describe('decodeAudio', () => {
   it('decodes padded and unpadded standard base64 alike', () => {
@@ -37,5 +37,15 @@ describe('decodeAudio', () => {
     const source = new Uint8Array(1024).map((_, i) => (i * 37) % 256)
     const decoded = decodeAudio(Buffer.from(source).toString('base64'))
     expect(decoded).toEqual(source)
+  })
+})
+
+describe('decodedByteLength', () => {
+  it('predicts the exact decoded size from the encoded text, padded or not', () => {
+    for (const size of [0, 1, 2, 3, 4, 5, 1000]) {
+      const encoded = Buffer.alloc(size, 7).toString('base64')
+      expect(decodedByteLength(encoded)).toBe(size)
+      expect(decodedByteLength(encoded.replace(/=+$/, ''))).toBe(size)
+    }
   })
 })

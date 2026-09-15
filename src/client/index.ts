@@ -3,14 +3,15 @@
  * microphone control in the `conversation.input.left` seat, and the voice card on the plugin
  * settings tab keyed by the `voice` namespace.
  *
- * The control writes its transcript through the input standard kit's public `setDraft`, so a
- * dictated prompt is an ordinary draft a person edits and sends. Nothing here reaches a model
- * directly and nothing is persisted.
+ * The control splices its transcript into the draft through the session scope's
+ * `slash/input-insert-text` verb, so a dictated prompt is an ordinary draft a person edits and sends —
+ * and the reference chips already in it survive. Nothing here reaches a model directly and nothing is
+ * persisted.
  * @module @deepseek-ai/dsh-client-ui-voice/client
  */
 
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
-import type { ClientContext, SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ClientContext, SessionId, SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 // Type-only: the ctx.remote Context merge and the generated `voice` namespace.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap merge (the input.left seat).
@@ -32,6 +33,7 @@ import { VoiceControl } from './VoiceControl.tsx'
 import { VoiceSettingsCard } from './VoiceSettingsCard.tsx'
 import { listMicrophones, type RecordedClip } from './recorder.ts'
 import { readDevice, writeDevice } from './device.ts'
+import type { DraftSpan } from './draft.ts'
 import { en, zh, type VoiceKey } from './locales.ts'
 
 export type { VoiceKey } from './locales.ts'
@@ -60,9 +62,11 @@ export interface VoiceControlInjected {
   /**
    * Send one recorded clip for transcription.
    * @param clip - the encoded recording.
+   * @param signal - aborts the call when its result is no longer wanted, such as a provisional pass
+   *   overtaken by the stop; the Host then frees its transcription slot.
    * @returns the transcript, or a classified failure carried as a value.
    */
-  transcribe: (clip: RecordedClip) => Promise<VoiceTranscribeResult>
+  transcribe: (clip: RecordedClip, signal?: AbortSignal) => Promise<VoiceTranscribeResult>
   /**
    * Clean up one transcript with the session's model.
    * @param text - the raw transcript.
@@ -74,6 +78,19 @@ export interface VoiceControlInjected {
    * @returns the stored device id, or undefined for the system default.
    */
   readDevice: () => string | undefined
+  /**
+   * Splice text into this session's draft in place, through the scoped `slash/input-insert-text`
+   * event the composer's input hub answers with its span-checked insertion.
+   *
+   * `inputActions.setDraft` cannot do this on the installed harness: it rebuilds the editor document
+   * from the draft's plain-text projection, which flattens every reference chip into literal `@path`
+   * text. Undefined when the session scope cannot be resolved; the control then falls back to
+   * `setDraft`, which is only reachable in composers that have no chips to lose.
+   * @param text - the text to insert.
+   * @param span - the span it replaces, in detect coordinates, fenced with the draft revision.
+   * @returns true when the editor applied it; false when the revision moved first.
+   */
+  insertText: ((text: string, span: DraftSpan) => boolean) | undefined
 }
 
 /** Injected business face of the voice settings card. */
@@ -145,7 +162,7 @@ export async function apply(ctx: ClientContext): Promise<void> {
   // the split is what lets the seats hold a properly injected reference.
   ctx.plugin({
     name: 'voice-surface',
-    inject: ['slots', 'settingsScope', 'locale', 'remote', 'remote.voice'],
+    inject: ['slots', 'settingsScope', 'locale', 'sessions', 'remote', 'remote.voice'],
     apply: surface,
   })
 }
@@ -163,8 +180,8 @@ function surface(ctx: ClientContext): void {
     return result.value
   }
   const describeVoice = (): Promise<VoiceCapabilityView> => ctx.remote.voice.describe().then(unwrap)
-  const transcribe = (clip: RecordedClip): Promise<VoiceTranscribeResult> =>
-    ctx.remote.voice.transcribe({ audioBase64: clip.base64, mimeType: clip.mimeType }).then(unwrap)
+  const transcribe = (clip: RecordedClip, signal?: AbortSignal): Promise<VoiceTranscribeResult> =>
+    ctx.remote.voice.transcribe({ audioBase64: clip.base64, mimeType: clip.mimeType }, signal).then(unwrap)
   const polish = (text: string): Promise<VoicePolishResult> => ctx.remote.voice.polish(text).then(unwrap)
 
   ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
@@ -172,7 +189,9 @@ function surface(ctx: ClientContext): void {
     // List seats are addressed by id; the seat orders itself after the resident chrome.
     id: 'voice',
     locale: NS,
-    inject: (): VoiceControlInjected => ({ describeVoice, transcribe, polish, readDevice }),
+    inject: (sessionId: SessionId): VoiceControlInjected => ({
+      describeVoice, transcribe, polish, readDevice, insertText: textInserter(ctx, sessionId),
+    }),
   }, VoiceControl))
 
   const scope = ctx.settingsScope.bind<VoiceSettings>({ namespace: NS })
@@ -190,4 +209,34 @@ function surface(ctx: ClientContext): void {
       writeDevice,
     }),
   }, VoiceSettingsCard))
+}
+
+/**
+ * The one member of a session scope the text writer calls. The event's request type is declared by
+ * the input-trigger package, which this plugin does not depend on; naming the single call keeps the
+ * cast as narrow as the use.
+ */
+interface ScopedTextInsert {
+  bail(thisArg: unknown, name: 'slash/input-insert-text', request: { readonly text: string; readonly span: DraftSpan }): unknown
+}
+
+/**
+ * Bind the in-place text writer for one session.
+ *
+ * Emitted as the scoped `slash/input-insert-text` event on the session scope, which the composer's
+ * input hub answers with its span-checked text insertion — a public verb in both the checkout this
+ * compiles against and the installed harness (`dsh-client-ui-conversation` 0.1.5-rc.2). Being an
+ * ordinary editor update, it is one undo step, and it leaves every node outside its span alone.
+ * @param ctx - the fiber holding the session service.
+ * @param sessionId - the session the seat is mounted for.
+ * @returns the writer, or undefined when the session scope is not resolvable.
+ */
+function textInserter(
+  ctx: ClientContext,
+  sessionId: SessionId,
+): ((text: string, span: DraftSpan) => boolean) | undefined {
+  const actx = ctx.sessions.scope(sessionId)
+  if (actx === undefined) return undefined
+  const scope = actx as unknown as ScopedTextInsert
+  return (text, span) => scope.bail(actx, 'slash/input-insert-text', { text, span }) === true
 }

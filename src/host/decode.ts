@@ -28,3 +28,18 @@ export function decodeAudio(value: string): Uint8Array<ArrayBuffer> | undefined 
   bytes.set(decoded)
   return bytes
 }
+
+/**
+ * The byte length a base64 payload decodes to, computed from its text alone.
+ *
+ * The Host enforces its clip-size cap on this rather than on decoded bytes, so an oversized upload is
+ * refused before a buffer of that size is allocated and copied — the cap is what protects the heap,
+ * and checking it after decoding spent the memory it was meant to save. Exact for canonical base64;
+ * a non-canonical payload is refused by {@link decodeAudio} afterwards anyway.
+ * @param value - the browser-supplied base64 string, padded or not.
+ * @returns the decoded size in bytes.
+ */
+export function decodedByteLength(value: string): number {
+  const unpadded = value.endsWith('==') ? value.length - 2 : value.endsWith('=') ? value.length - 1 : value.length
+  return Math.floor(unpadded * 3 / 4)
+}

@@ -15,7 +15,8 @@ import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { isTranscriptionError } from '../transcription/index.ts'
-import { decodeAudio } from './decode.ts'
+import { decodeAudio, decodedByteLength } from './decode.ts'
+import { TranscriptionGate } from './transcription-gate.ts'
 import type {} from '../transcription/index.ts'
 import type {
   VoiceCapabilityView,
@@ -67,6 +68,12 @@ export class VoiceService extends TypertRemoteService {
   })
 
   private source: () => Config
+
+  /**
+   * Bounds concurrent transcriptions on this Host. Per service instance, which is per Host process:
+   * every browser tab and every provisional pass shares it, and that sharing is the point.
+   */
+  private readonly gate = new TranscriptionGate()
 
   /**
    * @param ctx - Host context; the transcription provider is resolved optionally so a deployment
@@ -133,24 +140,37 @@ export class VoiceService extends TypertRemoteService {
     if (engine === undefined) {
       return { ok: false, code: 'no-provider', message: 'no transcription provider is mounted' }
     }
+    const { maxClipBytes, language } = this.source()
+    // Sized from the text before decoding: the cap exists to keep an oversized upload off the heap,
+    // and decoding first would allocate exactly the buffer it refuses.
+    const encodedBytes = decodedByteLength(request.audioBase64)
+    if (encodedBytes > maxClipBytes) {
+      return {
+        ok: false,
+        code: 'clip-too-large',
+        message: `clip is ${encodedBytes} bytes, over the ${maxClipBytes}-byte limit`,
+      }
+    }
     const data = decodeAudio(request.audioBase64)
     if (data === undefined) {
       return { ok: false, code: 'malformed-audio', message: 'audio payload is not canonical base64' }
     }
-    const { maxClipBytes, language } = this.source()
-    if (data.byteLength > maxClipBytes) {
-      return {
-        ok: false,
-        code: 'clip-too-large',
-        message: `clip is ${data.byteLength} bytes, over the ${maxClipBytes}-byte limit`,
-      }
-    }
     try {
-      const result = await engine.transcribe({
+      const admitted = await this.gate.run(signal, () => engine.transcribe({
         data,
         mimeType: request.mimeType,
         ...language === undefined ? {} : { language },
-      }, signal)
+      }, signal))
+      if (admitted === undefined) {
+        // `provider-unavailable` rather than a new code: the browser already renders it as "try again",
+        // which is the right advice, and a new code would change the wire contract.
+        return {
+          ok: false,
+          code: 'provider-unavailable',
+          message: 'transcription is busy with other recordings; try again shortly',
+        }
+      }
+      const result = admitted.value
       return {
         ok: true,
         text: result.text,

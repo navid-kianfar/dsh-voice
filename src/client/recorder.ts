@@ -16,6 +16,7 @@ import {
   encodeWav,
   toBase64,
 } from './audio.ts'
+import { LOW_ENERGY_PEAK_RMS } from '../transcription/non-speech.ts'
 
 /** One finished recording, ready for the transcription endpoint. */
 export interface RecordedClip {
@@ -25,6 +26,12 @@ export interface RecordedClip {
   readonly mimeType: string
   /** Wall-clock length of the recording. */
   readonly durationMs: number
+  /**
+   * Loudest input level the meter measured while this clip was captured, as unscaled RMS of the
+   * time-domain signal (full scale = 1). Never sent to the Host: the control reads it to skip
+   * transcribing a clip that carried no signal, and to disbelieve a stock phrase on a quiet one.
+   */
+  readonly peakLevel: number
 }
 
 /** A live recording the caller can finish or abandon. */
@@ -91,9 +98,10 @@ export interface RecordingRequest {
 
 /**
  * Loudness below which a frame counts as silence. Chosen against normalized RMS of 8-bit
- * time-domain samples: room tone on a laptop mic sits well under this, speech well over.
+ * time-domain samples: room tone on a laptop mic sits well under this, speech well over. Shared with
+ * the non-speech rule, so "never heard speech" means one thing in the recorder and in the control.
  */
-const SILENCE_LEVEL = 0.02
+const SILENCE_LEVEL = LOW_ENERGY_PEAK_RMS
 
 /** How often loudness is sampled. Fast enough to look live, slow enough to stay off the main thread. */
 const METER_INTERVAL_MS = 50
@@ -159,6 +167,30 @@ export async function startRecording(request: RecordingRequest): Promise<Recordi
     throw new RecorderError('no-device', 'no microphone is available', { cause: error })
   }
 
+  try {
+    return record(request, stream, container, wantsWav)
+  } catch (error) {
+    // Anything that throws between getUserMedia and a returned session would otherwise leave the
+    // microphone open with nothing holding the stream to close it.
+    for (const track of stream.getTracks()) track.stop()
+    throw error
+  }
+}
+
+/**
+ * Wire one opened stream into a recorder, a meter, and the stop bounds.
+ * @param request - the caller's bounds and callbacks.
+ * @param stream - the opened microphone; released by the returned session's stop or cancel.
+ * @param container - the recorder mime type.
+ * @param wantsWav - whether the clip is re-encoded to WAV for the provider.
+ * @returns the live session.
+ */
+function record(
+  request: RecordingRequest,
+  stream: MediaStream,
+  container: string,
+  wantsWav: boolean,
+): RecordingSession {
   const recorder = new MediaRecorder(stream, { mimeType: container })
   const chunks: Blob[] = []
   recorder.addEventListener('dataavailable', (event) => {
@@ -171,7 +203,12 @@ export async function startRecording(request: RecordingRequest): Promise<Recordi
     const blob = new Blob(chunks, { type: container })
     if (blob.size === 0) throw new RecorderError('empty-recording', 'the recording captured no audio')
     const bytes = wantsWav ? await toWav(blob) : new Uint8Array(await blob.arrayBuffer())
-    return { base64: toBase64(bytes), mimeType: wantsWav ? 'audio/wav' : bareMediaType(container), durationMs }
+    return {
+      base64: toBase64(bytes),
+      mimeType: wantsWav ? 'audio/wav' : bareMediaType(container),
+      durationMs,
+      peakLevel,
+    }
   }
 
   // The meter also owns the silence decision, so loudness is measured once and read twice.
@@ -182,6 +219,7 @@ export async function startRecording(request: RecordingRequest): Promise<Recordi
   const frame = new Uint8Array(analyser.fftSize)
   let quietMs = 0
   let heardSpeech = false
+  let peakLevel = 0
   let ended: AutoStopReason | undefined
 
   const finish = (reason: AutoStopReason): void => {
@@ -199,6 +237,7 @@ export async function startRecording(request: RecordingRequest): Promise<Recordi
       sum += centred * centred
     }
     const level = Math.sqrt(sum / frame.length)
+    peakLevel = Math.max(peakLevel, level)
     request.onLevel?.(Math.min(1, level * 4))
     if (level >= SILENCE_LEVEL) {
       heardSpeech = true

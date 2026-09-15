@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-// Type-only: pulls the ui-conversation SlotMap merge (the input.left seat) and
-// the input standard kit (useInput + inputActions) it publishes.
+// Type-only: pulls the ui-conversation SlotMap merge (the input.left seat) and the input standard
+// kit (useInput + inputActions) it publishes.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { VoiceCapabilityView } from '../host/types.ts'
 import { MicIcon } from './MicIcon.tsx'
-import { appendTranscript } from './draft.ts'
-import { startRecording, type AutoStopReason, type RecordingSession } from './recorder.ts'
+import { appendTranscript, planTranscriptInsert } from './draft.ts'
+import { DictationController, type DictationDeps } from './dictation.ts'
+import { startRecording } from './recorder.ts'
 import type { VoiceControlInjected } from './index.ts'
 import css from './VoiceControl.module.css'
 
@@ -14,195 +14,119 @@ import css from './VoiceControl.module.css'
 export type VoiceControlProps =
   PropsRuntime<'conversation.input.left'> & InjectFace<VoiceControlInjected> & PropsLocale<'voice'>
 
-/** What the control is doing right now; every transition is driven by a user gesture or a settled promise. */
-type Phase = 'idle' | 'recording' | 'transcribing' | 'polishing'
-
 /**
- * Failure copy for one transcription outcome. Error surfaces stay English by repository policy, so
- * these are literals rather than dictionary keys.
- * @param code - the classified failure from the Host.
- * @returns a short operator-facing line.
+ * How long a refused transcript insert waits for the draft revision to move before it is reported.
+ * A refusal is normally a keystroke that landed between the input kit's publish and this seat's
+ * effect, and the next publish arrives within a frame; one that outlives this window is not that
+ * race, and retrying silently would leave the transcript nowhere.
  */
-function describeFailure(code: string): string {
-  switch (code) {
-    case 'no-provider': return 'no transcription provider'
-    case 'not-configured': return 'transcription is not configured'
-    case 'clip-too-large': return 'recording too long'
-    case 'unsupported-media-type': return 'unsupported audio format'
-    case 'provider-timeout': return 'transcription timed out'
-    case 'provider-unavailable': return 'transcription is unreachable'
-    case 'empty-audio': return 'nothing was recorded'
-    default: return 'transcription failed'
-  }
+const INSERT_RETRY_WINDOW_MS = 500
+
+/** A finished transcript on its way into the editor. */
+interface PendingTranscript {
+  /** Distinguishes two identical transcripts, so each is inserted once. */
+  readonly seq: number
+  readonly text: string
+  readonly replace: boolean
 }
 
 /**
  * The composer's microphone control: records from the system microphone, sends the clip to the Host
- * for transcription, and writes the result into the draft through the public input action.
+ * for transcription, and splices the result into the draft.
  *
+ * The lifecycle lives in {@link DictationController}; this component renders its state, forwards
+ * gestures, and owns the one step that needs the input kit — putting the transcript into the editor.
  * The gesture (`toggle` or `hold`) and the insertion rule come from the Host's voice settings, so
  * this component reads policy rather than owning it.
  */
 export function VoiceControl({
-  useInput, inputActions, describeVoice, transcribe, polish, readDevice, t,
+  useInput, inputActions, describeVoice, transcribe, polish, readDevice, insertText, t,
 }: VoiceControlProps) {
   const draft = useInput(state => state.draft)
-  const [view, setView] = useState<VoiceCapabilityView | null>(null)
-  const [phase, setPhase] = useState<Phase>('idle')
-  const [elapsedMs, setElapsedMs] = useState(0)
-  const [level, setLevel] = useState(0)
-  const [interim, setInterim] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  // The draft as it stood when recording began. Comparing against it at insert time is what makes a
-  // `replace` safe: text typed DURING dictation is the person's, and must not be thrown away.
-  const draftAtStartRef = useRef('')
-  const sessionRef = useRef<RecordingSession | null>(null)
-  const aliveRef = useRef(true)
-  // Read through a call rather than the property: an `await` can unmount this component, but the
-  // compiler narrows `aliveRef.current` after the first check and would treat every later one as
-  // dead code.
-  const alive = (): boolean => aliveRef.current
+  const draftRev = useInput(state => state.draftRev)
+  const occurrences = useInput(state => state.occurrences)
   const draftRef = useRef(draft)
   draftRef.current = draft
+  const [pending, setPending] = useState<PendingTranscript | null>(null)
+  const sequenceRef = useRef(0)
+  const insertedRef = useRef(0)
+  const [elapsedMs, setElapsedMs] = useState(0)
 
-  useEffect(() => {
-    aliveRef.current = true
-    return () => {
-      aliveRef.current = false
-      // A seat unmounting mid-recording must not leave the microphone indicator lit.
-      sessionRef.current?.cancel()
-      sessionRef.current = null
-    }
-  }, [])
+  // The controller reads its collaborators through this ref, so a re-render that hands the seat new
+  // callbacks never leaves a recording talking to stale ones.
+  const depsRef = useRef<DictationDeps | null>(null)
+  depsRef.current = {
+    describeVoice,
+    startRecording,
+    transcribe,
+    polish,
+    readDevice,
+    readDraft: () => draftRef.current,
+    deliver: (text, replace) => {
+      sequenceRef.current += 1
+      setPending({ seq: sequenceRef.current, text, replace })
+    },
+  }
+  const [controller] = useState(() => new DictationController(() => depsRef.current as DictationDeps))
+  const { view, phase, level, interim, error, notice } = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
 
-  useEffect(() => {
-    void describeVoice().then((next) => {
-      if (alive()) setView(next)
-    }, () => {
-      // A failed probe leaves `view` null, which renders the control disabled with its
-      // not-configured tooltip — the same state a deployment without a provider produces.
-    })
-  }, [describeVoice])
+  useEffect(() => controller.mount(), [controller])
 
   useEffect(() => {
     if (phase !== 'recording') return undefined
     const startedAt = performance.now()
     setElapsedMs(0)
-    const tick = setInterval(() =>{  setElapsedMs(performance.now() - startedAt) }, 200)
-    return () =>{  clearInterval(tick) }
+    const tick = setInterval(() => { setElapsedMs(performance.now() - startedAt) }, 200)
+    return () => { clearInterval(tick) }
   }, [phase])
 
-  const finish = useCallback(async (): Promise<void> => {
-    const session = sessionRef.current
-    sessionRef.current = null
-    if (session === null) return
-    setPhase('transcribing')
-    setLevel(0)
-    try {
-      const clip = await session.stop()
-      const result = await transcribe(clip)
-      if (!alive()) return
-      if (!result.ok) {
-        setError(describeFailure(result.code))
-        return
-      }
-      if (result.text === '') {
-        setError('nothing was heard')
-        return
-      }
-
-      let text = result.text
-      if (view?.polish === true) {
-        setPhase('polishing')
-        // A failed cleanup is not a failed dictation: the raw transcript is always usable, so the
-        // failure is swallowed and the original text goes in.
-        const polished = await polish(text).catch(() => null)
-        if (!alive()) return
-        if (polished !== null && polished.ok && polished.text !== '') text = polished.text
-      }
-
-      const draftNow = draftRef.current
-      const typedDuring = draftNow !== draftAtStartRef.current
-      // `replace` becomes `append` when the person typed while dictating — discarding their
-      // keystrokes to honour a preference they set earlier is never what they meant.
-      inputActions.setDraft(view?.insertMode === 'replace' && !typedDuring
-        ? text
-        : appendTranscript(draftNow, text))
-    } catch (cause) {
-      if (!alive()) return
-      setError(cause instanceof Error ? cause.message : 'transcription failed')
-    } finally {
-      if (alive()) {
-        setPhase('idle')
-        setInterim('')
-      }
+  useEffect(() => {
+    if (pending === null || insertedRef.current === pending.seq) return undefined
+    if (insertText === undefined) {
+      // No session scope to address the scoped verb: a composer this old has a plain-text draft and
+      // no chips, so rebuilding it from text loses nothing.
+      insertedRef.current = pending.seq
+      inputActions.setDraft(pending.replace ? pending.text : appendTranscript(draft, pending.text))
+      setPending(null)
+      return undefined
     }
-  }, [inputActions, transcribe, polish, view?.insertMode, view?.polish])
-
-  const begin = useCallback(async (): Promise<void> => {
-    setError(null)
-    // Re-read policy at the gesture: a settings change between mount and now must take effect.
-    const current = await describeVoice().catch(() => view)
-    if (!alive()) return
-    if (current !== null) setView(current)
-    if (current === null || !current.ready) {
-      setError(current?.detail ?? 'transcription is not configured')
-      return
+    // Spliced in place through the editor's span-checked verb. `setDraft` would rebuild the document
+    // from the draft's plain-text projection and turn every reference chip into literal `@path` text.
+    const plan = planTranscriptInsert({ draft, draftRev, occurrences }, pending.text, pending.replace)
+    if (insertText(plan.text, plan.span)) {
+      insertedRef.current = pending.seq
+      setPending(null)
+      return undefined
     }
-    try {
-      draftAtStartRef.current = draftRef.current
-      setInterim('')
-      let interimBusy = false
-      sessionRef.current = await startRecording({
-        accepted: current.acceptedMediaTypes,
-        maxMs: current.maxClipSeconds * 1000,
-        ...readDevice() === undefined ? {} : { deviceId: readDevice() as string },
-        ...current.silenceStopMs === undefined ? {} : { silenceStopMs: current.silenceStopMs },
-        ...current.liveIntervalMs === undefined ? {} : { liveIntervalMs: current.liveIntervalMs },
-        onLevel: (next) => { if (alive()) setLevel(next) },
-        onInterim: (clip) => {
-          // Provisional passes are dropped rather than queued when one is still in flight, and they
-          // never touch the draft: the composer only changes once, when the person stops speaking.
-          if (interimBusy || !alive()) return
-          interimBusy = true
-          void transcribe(clip)
-            .then((result) => { if (alive() && result.ok && result.text !== '') setInterim(result.text) })
-            .catch(() => {})
-            .finally(() => { interimBusy = false })
-        },
-        onAutoStop: (reason: AutoStopReason) => { if (alive() && reason === 'silence') void finish() },
-      })
-      if (!alive()) {
-        sessionRef.current.cancel()
-        sessionRef.current = null
-        return
-      }
-      setPhase('recording')
-    } catch (cause) {
-      if (!alive()) return
-      setError(cause instanceof Error ? cause.message : 'could not open the microphone')
-    }
-  }, [describeVoice, view, transcribe, readDevice, finish])
+    // Refused: the revision moved first. The next publish re-runs this effect against it; a refusal
+    // that outlives the window is reported with the transcript, so the dictation is never lost silently.
+    const giveUp = setTimeout(() => {
+      insertedRef.current = pending.seq
+      setPending(null)
+      controller.report(`transcript not inserted: ${pending.text}`)
+    }, INSERT_RETRY_WINDOW_MS)
+    return () => { clearTimeout(giveUp) }
+  }, [pending, draft, draftRev, occurrences, insertText, inputActions, controller])
 
   // An unmounted capability leaves the seat empty rather than showing a dead button: a deployment
   // that composed no provider pays no layout, the same contract the named composer seats keep.
   if (view === null || !view.available) return null
 
   const hold = view.interactionMode === 'hold'
+  // Not disabled while starting: a disabled button receives no pointerup, and the hold gesture needs
+  // the release that arrives during the permission prompt.
   const disabled = phase === 'transcribing'
 
   const onClick = (): void => {
-    if (hold) return
-    if (phase === 'recording') void finish()
-    else if (phase === 'idle') void begin()
+    if (!hold) controller.press()
   }
   const onPointerDown = (event: React.PointerEvent<HTMLButtonElement>): void => {
     if (!hold || phase !== 'idle') return
     event.currentTarget.setPointerCapture(event.pointerId)
-    void begin()
+    controller.holdStart()
   }
   const onPointerUp = (): void => {
-    if (hold && phase === 'recording') void finish()
+    if (hold) controller.holdEnd()
   }
 
   const working = phase === 'transcribing' || phase === 'polishing'
@@ -226,6 +150,7 @@ export function VoiceControl({
         className={`${css.button} ${phase === 'recording' ? css.recording : ''} ${working ? css.busy : ''}`}
         aria-label={label}
         aria-pressed={phase === 'recording'}
+        aria-busy={phase === 'starting' || working}
         title={title}
         disabled={disabled}
         onClick={onClick}
@@ -256,6 +181,9 @@ export function VoiceControl({
         <span className={css.interim} title={interim}>{interim}</span>
       )}
       {phase === 'polishing' && <span className={css.elapsed}>{t('mic.polishing.short')}</span>}
+      {/* Information rather than failure (the duration cap, a released hold), so it reads in the
+          secondary text colour; English by the same error-surface policy as the line below. */}
+      {notice !== null && <span className={css.elapsed} role="status">{notice}</span>}
       {/* Failure copy stays English (error-surface policy: not localized). */}
       {error !== null && <span className={css.error} role="status" title={error}>{error}</span>}
     </span>

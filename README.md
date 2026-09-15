@@ -96,7 +96,7 @@ The **Voice input** card on the plugin settings tab edits these live; the values
 |---|---|---|
 | `interactionMode` | `toggle` | `toggle` = click to start, click to stop. `hold` = hold the button to talk. |
 | `insertMode` | `append` | Whether a transcript appends to the draft or replaces it. |
-| `maxClipSeconds` | `120` | Longest recording the browser will make. |
+| `maxClipSeconds` | `120` | Longest recording the browser will make. Reaching it ends the recording exactly like a stop — the clip is transcribed and the microphone released — and the control says the limit was hit. |
 | `maxClipBytes` | `26214400` | Largest clip the Host accepts (25 MiB, the hosted API's ceiling). |
 | `language` | *(unset)* | BCP-47 hint. Blank asks the provider to detect the language. |
 | `polish` | `true` | Clean the transcript with the session's own model — no second credential. |
@@ -118,16 +118,19 @@ Cleanup runs through `ctx.llm` with the model your deployment already selected, 
 composer mic seat ─ getUserMedia → MediaRecorder → (re-encode to WAV if needed)
         │                                            └─ negotiated against the provider
         ▼  base64 over one unary RPC
-Host  VoiceService.transcribe() ─ byte cap ─→ ctx.transcription ─┬─ openai-compatible
-        │                                                        └─ whisper-cpp
+Host  VoiceService.transcribe() ─ byte cap ─ concurrency gate ─→ ctx.transcription ─┬─ openai-compatible
+        │                                                                          └─ whisper-cpp
         ▼  { text } | { code, message }
-composer draft ← inputActions.setDraft()
+composer draft ← scoped `slash/input-insert-text` (spliced in place)
 ```
 
 Three decisions worth knowing:
 
 - **Nothing is persisted and nothing is model-facing.** The transcript reaches the model only if you send it, as ordinary user-message text. The plugin registers no prompt, no tool, and no session event; the audio is decoded, transcribed, and discarded inside one call.
 - **Failures cross the wire as values, not exceptions.** The RPC gateway erases a thrown error's classification, and the composer's next move depends on which class it was — "configure a provider" is not "try again".
+- **The transcript is spliced in, not written over the draft.** The installed composer is a rich editor whose draft holds reference chips; its `setDraft` rebuilds the document from plain text and would turn every chip back into literal `@path` text. The control inserts through the session scope's span-checked `slash/input-insert-text` verb instead — at the end of the draft for `append`, over the whole draft for `replace` — so chips survive and one undo removes the dictation.
+- **Silence is not sent, and whisper's silence words are not believed.** Whisper models print `you` or `(machine whirring)` for a silent clip rather than nothing. The browser skips transcribing a clip whose loudest moment never rose above room tone; annotation-only output is always dropped; and a stock phrase (`you`, `thank you`, …) is dropped only when the clip was quiet, so a real one-word dictation still lands. The whisper-cpp provider applies the same rule to the WAV it is given, without spawning the binary for silence.
+- **Transcription is admission-controlled.** A Host runs at most two transcriptions at once and queues four more; past that it answers `provider-unavailable` ("busy") immediately. Provisional passes are cancelled when you stop, so they never hold a slot the final pass needs. The byte cap is checked on the base64 length, before the clip is decoded.
 - **The recorder negotiates format.** `describe()` reports what the mounted provider accepts, so a WAV-only local binary and a container-flexible hosted API are the same code path.
 
 ## Writing another provider
@@ -179,6 +182,9 @@ On a fresh clone pnpm may refuse esbuild's postinstall (`ERR_PNPM_IGNORED_BUILDS
 - **Provisional transcripts re-transcribe from the start.** A compressed stream's later chunks are not independently decodable, so each live pass covers the whole clip. That is why `liveIntervalMs` is opt-in rather than a default.
 - **Web Client only.** The terminal CLI has no capture path; adding one means a host-side recorder and an external binary.
 - **One provider at a time.** No runtime selection among several, and no fallback from a remote provider to a local one.
+- **Dictation lands at the end of the draft, not at the caret.** A seat outside the editor cannot read the editor's selection in the coordinates its insert verb accepts.
+- **Hold-to-talk needs the button held after the microphone opens.** Releasing it while the browser's permission prompt is still up cancels that start (the control says so); press again once access is granted.
+- **whisper-cli exits 0 on unreadable audio.** The provider reads its `error:` / `failed to read audio` lines instead, and reports the tail of stderr, where the reason is.
 - **`describe()` checks the whisper.cpp binary, not the model.** A missing or corrupt `modelPath` surfaces on the first real call, because verifying it means loading it.
 
 ## License

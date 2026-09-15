@@ -26,7 +26,9 @@ import {
   ACCEPTED_MEDIA_TYPES,
   buildWhisperArgv,
   classifyExit,
+  wavPeakRms,
 } from './whisper-protocol.ts'
+import { NO_SIGNAL_PEAK_RMS, isNonSpeechTranscript } from '../transcription/non-speech.ts'
 import { bareMediaType } from './openai-protocol.ts'
 
 /** Provider identity reported by `describe()`; equal to this package's plugin name. */
@@ -134,6 +136,12 @@ export class WhisperCppTranscription extends TranscriptionEngine {
       throw new TranscriptionError('unsupported-media-type', `whisper.cpp reads 16 kHz mono WAV, not ${media || clip.mimeType}`)
     }
 
+    // Silence is answered without spawning. whisper.cpp does not return empty text for a silent clip —
+    // 1.9.4 with ggml-base.en prints "you" — and the inference costs every core it is given to learn
+    // nothing. A WAV this function cannot parse is measured as undefined and goes to the binary.
+    const peakRms = wavPeakRms(clip.data)
+    if (peakRms !== undefined && peakRms < NO_SIGNAL_PEAK_RMS) return { text: '' }
+
     const scratch = await mkdtemp(join(tmpdir(), 'dsh-voice-'))
     try {
       const wav = join(scratch, 'clip.wav')
@@ -169,7 +177,10 @@ export class WhisperCppTranscription extends TranscriptionEngine {
         handle.collected.stderr?.readFrom(0).text ?? '',
       )
       if (failure !== undefined) throw failure
-      return { text: (handle.collected.stdout?.readFrom(0).text ?? '').trim() }
+      const text = (handle.collected.stdout?.readFrom(0).text ?? '').trim()
+      // The contract says silence is empty text; whisper's non-speech annotations and its stock
+      // phrases on quiet audio are silence spelled differently.
+      return { text: isNonSpeechTranscript(text, peakRms) ? '' : text }
     } finally {
       await discardScratch(scratch)
     }
