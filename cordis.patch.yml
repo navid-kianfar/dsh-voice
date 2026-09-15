@@ -21,15 +21,18 @@
         maxClipBytes: 26214400
         interactionMode: toggle
         insertMode: append
-        # Dictation is speech, not prose. The session's own model removes fillers, restores
-        # punctuation, and turns spoken enumerations into lists — no second credential involved.
-        polish: true
+        # Dictation is speech, not prose. Polish has the deployment's default model remove fillers,
+        # restore punctuation, and turn spoken enumerations into lists — no second credential involved.
+        # OFF by default because it sends the transcript TEXT to that model: with whisper-cpp and a
+        # hosted model, the audio stays on this machine but the words do not. Opt in knowingly.
+        polish: false
         # Stop when the speaker stops, rather than making them reach for the button. Well above a
-        # natural between-sentence pause, so it ends a dictation without truncating one.
+        # natural between-sentence pause, so it ends a dictation without truncating one. 0 turns it
+        # off; so does leaving the key out of this row.
         silenceStopMs: 2500
         # Provisional in-progress transcripts are OFF by default: each pass re-transcribes from the
         # beginning, which is cheap against a local binary and billed per pass against a hosted one.
-        # Set it (2000 is comfortable) when running the whisper-cpp provider.
+        # Set it (2000 is comfortable) when running the whisper-cpp provider; 0 also means off.
         # liveIntervalMs: 2000
 
     # The BARE package name, deliberately: the Web Client discovers a browser half
@@ -52,6 +55,8 @@
       disabled: true
       config:
         binaryPath: whisper-cli
+        # Empty means no model: the provider reports "no model configured" until this names a
+        # readable GGML file by absolute path (a leading ~/ is expanded).
         modelPath: ''
         timeoutMs: 300000
         maxOutputBytes: 262144

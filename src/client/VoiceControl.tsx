@@ -133,8 +133,13 @@ export function VoiceControl({
   const label = phase === 'recording'
     ? t('mic.recording.aria')
     : working ? t('mic.transcribing.aria') : t('mic.idle.aria')
-  const title = !view.ready
+  // The readiness detail ("no model configured: …") rides on the title, so the reason is visible on
+  // hover before a press; it stays English, like every other operator diagnostic on this control.
+  const unconfigured = view.detail === undefined
     ? t('mic.unconfigured.title')
+    : `${t('mic.unconfigured.title')}: ${view.detail}`
+  const title = !view.ready
+    ? unconfigured
     : phase === 'recording'
       ? t('mic.recording.title')
       : phase === 'polishing'

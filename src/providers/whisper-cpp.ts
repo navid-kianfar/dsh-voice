@@ -9,8 +9,9 @@
  * @module @deepseek-ai/dsh-transcription-whisper-cpp
  */
 
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { constants } from 'node:fs'
+import { access, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -26,6 +27,7 @@ import {
   ACCEPTED_MEDIA_TYPES,
   buildWhisperArgv,
   classifyExit,
+  resolveModelPath,
   wavPeakRms,
 } from './whisper-protocol.ts'
 import { NO_SIGNAL_PEAK_RMS, isNonSpeechTranscript } from '../transcription/non-speech.ts'
@@ -38,7 +40,11 @@ const PROVIDER_NAME = 'transcription-whisper-cpp'
 export interface Config {
   /** Absolute path to the compiled `whisper-cli` (older builds name it `main`). */
   binaryPath: string
-  /** Absolute path to the GGML/GGUF model file the binary should load. */
+  /**
+   * Absolute path to the GGML/GGUF model file the binary should load; a leading `~/` is expanded to
+   * the Host user's home. Empty — the shipped default — means no model is configured, and the
+   * provider reports itself not ready until one is.
+   */
   modelPath: string
   /**
    * Threads the binary may use. Absent leaves the choice to whisper.cpp's own default, which reads
@@ -61,6 +67,55 @@ export interface Config {
    * seam applies no defaults, so the deadline policy for killing a stuck inference is stated here.
    */
   graceMs: number
+}
+
+/** The resolved model file, or the operator-facing reason it cannot be loaded. */
+type ModelCheck =
+  | { readonly usable: true; readonly path: string }
+  | { readonly usable: false; readonly path?: string; readonly detail: string }
+
+/**
+ * Check that the configured model is a readable file, answering with a reason rather than throwing.
+ *
+ * Checked here rather than left to the binary: whisper-cli given a missing model prints
+ * `failed to initialize whisper context` after its backend noise, which reaches the person as a
+ * failed dictation instead of as the configuration problem it is.
+ * @param configured - `modelPath` as the deployment wrote it.
+ * @returns the path to hand the binary, or why there is none.
+ */
+async function checkModel(configured: string): Promise<ModelCheck> {
+  const home = homedir()
+  const resolved = resolveModelPath(configured, home)
+  if (resolved.kind === 'unusable') return { usable: false, detail: resolved.detail }
+  const path = resolved.path
+  try {
+    const entry = await stat(path)
+    if (!entry.isFile()) return { usable: false, path, detail: `model path is not a file: ${path}` }
+    await access(path, constants.R_OK)
+  } catch (error) {
+    return { usable: false, path, detail: unreadableModelDetail(path, error) }
+  }
+  return { usable: true, path }
+}
+
+/**
+ * Describe why a model path could not be opened.
+ * @param path - the resolved path.
+ * @param error - what `stat` or `access` rejected with.
+ * @returns the readiness detail.
+ */
+function unreadableModelDetail(path: string, error: unknown): string {
+  const code = (error as NodeJS.ErrnoException).code
+  switch (code) {
+    case 'ENOENT':
+    case 'ENOTDIR':
+      return `model file not found at ${path}`
+    case 'EACCES':
+    case 'EPERM':
+      return `model file not readable at ${path}`
+    default:
+      return `model file not accessible at ${path} (${code ?? String(error)})`
+  }
 }
 
 /**
@@ -103,13 +158,16 @@ export class WhisperCppTranscription extends TranscriptionEngine {
   }
 
   /**
-   * Report identity and whether the configured binary can be resolved now.
-   * @returns the provider's identity, model path, accepted media type, and readiness.
+   * Report identity and whether a transcription attempted now could run: the binary resolves AND
+   * the model file is there to load. Ready on the binary alone used to promise a dictation whose
+   * first attempt then failed on the shipped empty `modelPath`.
+   * @returns the provider's identity, resolved model path, accepted media type, and readiness.
    */
   async describe(): Promise<TranscriptionProviderInfo> {
+    const model = await checkModel(this.config.modelPath)
     const base = {
       provider: PROVIDER_NAME,
-      model: this.config.modelPath,
+      ...model.path === undefined ? {} : { model: model.path },
       acceptedMediaTypes: ACCEPTED_MEDIA_TYPES,
     }
     try {
@@ -120,6 +178,7 @@ export class WhisperCppTranscription extends TranscriptionEngine {
       // ready" answer; the operator sees the exact cause from `transcribe()`, which does not swallow it.
       return { ...base, ready: false, detail: `whisper binary not runnable at ${this.config.binaryPath}` }
     }
+    if (!model.usable) return { ...base, ready: false, detail: model.detail }
     return { ...base, ready: true }
   }
 
@@ -136,6 +195,11 @@ export class WhisperCppTranscription extends TranscriptionEngine {
       throw new TranscriptionError('unsupported-media-type', `whisper.cpp reads 16 kHz mono WAV, not ${media || clip.mimeType}`)
     }
 
+    // The same check readiness makes, so a call that races a settings change or skips `describe()`
+    // fails as the configuration problem it is rather than as a rejected clip.
+    const model = await checkModel(this.config.modelPath)
+    if (!model.usable) throw new TranscriptionError('not-configured', model.detail)
+
     // Silence is answered without spawning. whisper.cpp does not return empty text for a silent clip —
     // 1.9.4 with ggml-base.en prints "you" — and the inference costs every core it is given to learn
     // nothing. A WAV this function cannot parse is measured as undefined and goes to the binary.
@@ -151,7 +215,7 @@ export class WhisperCppTranscription extends TranscriptionEngine {
       const handle = this.ctx.subprocess.spawn({
         argv: [...buildWhisperArgv({
           binaryPath: this.config.binaryPath,
-          modelPath: this.config.modelPath,
+          modelPath: model.path,
           wavPath: wav,
           ...this.config.threads === undefined ? {} : { threads: this.config.threads },
           ...clip.language === undefined ? {} : { language: clip.language },

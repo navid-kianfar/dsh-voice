@@ -68,7 +68,7 @@ export interface VoiceControlInjected {
    */
   transcribe: (clip: RecordedClip, signal?: AbortSignal) => Promise<VoiceTranscribeResult>
   /**
-   * Clean up one transcript with the session's model.
+   * Clean up one transcript with the deployment's default model (not the session's own selection).
    * @param text - the raw transcript.
    * @returns the cleaned text, or a classified failure the caller ignores in favour of the raw text.
    */

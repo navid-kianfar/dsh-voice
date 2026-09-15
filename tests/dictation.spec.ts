@@ -122,6 +122,17 @@ describe('DictationController — starting (finding 3)', () => {
   })
 })
 
+describe('DictationController — provider not ready', () => {
+  it('shows the provider\'s readiness reason on press and opens no microphone', async () => {
+    const detail = 'no model configured: set modelPath on the voice-whisper-cpp row'
+    const h = harness({ describeVoice: () => Promise.resolve({ ...VIEW, ready: false, detail }) })
+    h.controller.press()
+    await settle()
+    expect(h.requests).toHaveLength(0)
+    expect(h.state()).toMatchObject({ phase: 'idle', error: detail })
+  })
+})
+
 describe('DictationController — hold released before recording started (finding 4)', () => {
   it('abandons the start, tells the person why, and cancels the stream when it arrives', async () => {
     const h = harness()

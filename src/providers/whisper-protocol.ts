@@ -5,10 +5,22 @@
  * @module @achasoft/dsh-voice/providers/whisper-protocol
  */
 
+import { isAbsolute, join } from 'node:path'
 import { TranscriptionError } from '../transcription/index.ts'
 
 /** The only media type the binary decodes. */
 export const ACCEPTED_MEDIA_TYPES: readonly string[] = Object.freeze(['audio/wav'])
+
+/**
+ * whisper-cli's own spelling of "detect the spoken language". Passed explicitly because omitting
+ * `-l` does NOT detect: 1.9.4's `--help` lists the flag's default as `en`, so a multilingual model
+ * given no hint transcribes every language as if it were English. An English-only `.en` model
+ * ignores `auto` with a stderr warning and still exits 0 (verified against 1.9.4 with ggml-base.en).
+ */
+export const AUTO_DETECT_LANGUAGE = 'auto'
+
+/** The home-directory prefix a configured path may start with. */
+const HOME_PREFIX = '~'
 
 /** The inputs the argument vector varies on. */
 export interface WhisperInvocation {
@@ -20,19 +32,52 @@ export interface WhisperInvocation {
   readonly wavPath: string
   /** Threads the binary may use; absent leaves whisper.cpp's own default. */
   readonly threads?: number
-  /** BCP-47 hint; absent asks the binary to detect the language. */
+  /** BCP-47 hint; absent or blank asks the binary to detect the language. */
   readonly language?: string
+}
+
+/** A configured model path, resolved the way the binary will receive it — or why it cannot be. */
+export type ModelPathResolution =
+  | { readonly kind: 'resolved'; readonly path: string }
+  | { readonly kind: 'unusable'; readonly detail: string }
+
+/**
+ * Resolve the configured model path once, for both the readiness probe and the argument vector, so
+ * the file `describe()` vouches for is the file the binary loads.
+ *
+ * A leading `~` is expanded because the binary is spawned without a shell and would otherwise look
+ * for a directory literally named `~`. A relative path is refused rather than resolved: the binary
+ * runs with the per-call scratch directory as its working directory, so no relative path could ever
+ * name the intended file — the same reason the subprocess seam refuses relative executables.
+ * @param configured - `modelPath` exactly as the deployment wrote it.
+ * @param home - the Host user's home directory.
+ * @returns the absolute path, or an operator-facing reason the path cannot be used.
+ */
+export function resolveModelPath(configured: string, home: string): ModelPathResolution {
+  const trimmed = configured.trim()
+  if (trimmed === '') {
+    return { kind: 'unusable', detail: 'no model configured: set modelPath on the voice-whisper-cpp row' }
+  }
+  if (trimmed === HOME_PREFIX) return { kind: 'resolved', path: home }
+  if (trimmed.startsWith(`${HOME_PREFIX}/`)) {
+    const rest = trimmed.slice(HOME_PREFIX.length + 1)
+    return { kind: 'resolved', path: join(home, rest) }
+  }
+  if (isAbsolute(trimmed)) return { kind: 'resolved', path: trimmed }
+  return { kind: 'unusable', detail: `model path must be absolute or start with ~/: ${configured}` }
 }
 
 /**
  * Build the argument vector for one transcription.
  *
  * Timestamps and progress chatter are suppressed because both would land in the text this provider
- * returns — stdout IS the transcript.
+ * returns — stdout IS the transcript. The language is always passed; see {@link AUTO_DETECT_LANGUAGE}.
  * @param invocation - binary, model, clip, and the two optional knobs.
  * @returns argv with the executable at index 0.
  */
 export function buildWhisperArgv(invocation: WhisperInvocation): readonly string[] {
+  const hint = invocation.language?.trim() ?? ''
+  const language = hint === '' ? AUTO_DETECT_LANGUAGE : hint
   return [
     invocation.binaryPath,
     '-m', invocation.modelPath,
@@ -40,7 +85,7 @@ export function buildWhisperArgv(invocation: WhisperInvocation): readonly string
     '--no-timestamps',
     '--no-prints',
     ...invocation.threads === undefined ? [] : ['-t', String(invocation.threads)],
-    ...invocation.language === undefined ? [] : ['-l', invocation.language],
+    '-l', language,
   ]
 }
 

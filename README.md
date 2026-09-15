@@ -1,55 +1,147 @@
 # @achasoft/dsh-voice
 
-Voice input for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web Client. A microphone button in the composer records what you say, transcribes it, and drops the text into the draft — where you read and edit it before sending.
+Voice input for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) Web Client. A microphone button in the composer records what you say and sends the clip to the dsh host for transcription. If you turn polish on, the deployment's default model then tidies the text. The result is added to the end of your draft, where you can edit it before sending. The plugin can transcribe with a local [whisper.cpp](https://github.com/ggml-org/whisper.cpp) binary, so the audio never leaves the machine, or with any endpoint that speaks OpenAI's `/audio/transcriptions` API.
 
-Transcription is a swappable capability. Ship it against a hosted Whisper API, a Whisper server on your own machine, or a local `whisper.cpp` binary with no network at all.
+![Composer with the microphone button at the left of the input toolbar](https://raw.githubusercontent.com/navid-kianfar/dsh-voice/main/docs/screenshots/composer-mic.png)
 
-**What makes a dictation usable, not just possible:** the transcript is cleaned up by the model you already configured — fillers gone, punctuation restored, spoken enumerations turned into lists. Recording stops when you stop talking. A live level meter shows it is hearing you, and an optional provisional transcript appears while you speak. Text you type mid-dictation is never overwritten.
+## Features
+
+### Microphone control
+
+The button sits at the left of the composer's input toolbar. It appears only when a transcription provider row is enabled. With no provider, the seat renders nothing.
+
+| Gesture (`interactionMode`) | Start | Stop |
+|---|---|---|
+| `toggle` (default) | Click | Click again |
+| `hold` | Press and hold | Release |
+
+In `hold` mode, releasing the button before the microphone has opened cancels the start. That usually happens while the browser's permission prompt is still showing. The control then says "hold the button while you speak". Press again once access is granted.
+
+While recording, a three-bar level meter and an elapsed-seconds timer appear next to the button. The meter shows the microphone is actually picking up sound. After you stop, the button is disabled while the clip is transcribed. If polish is on, "polishing…" is shown while the model cleans up the text.
+
+![Composer mid-recording: highlighted mic button, level meter, elapsed timer](https://raw.githubusercontent.com/navid-kianfar/dsh-voice/main/docs/screenshots/recording.png)
+
+### Automatic stops
+
+- **Silence** (`silenceStopMs`, default 2500 ms): the recording ends after that much continuous quiet, but only once speech has been heard, so a slow start is not cut off. No notice is shown. Set it to `0` to turn silence stop off.
+- **Length cap** (`maxClipSeconds`, default 120 s): the recording ends and is transcribed as if you had stopped it. The control shows "stopped at the 120s limit".
+
+### Live preview
+
+When `liveIntervalMs` is set above `0`, the recording captured so far is transcribed again at that interval. The provisional text appears next to the timer. It is never written to the draft. The draft changes once, when dictation ends. Each pass starts from the beginning of the clip, so against a hosted endpoint every pass is a billed request. That is why the preview is off by default.
+
+### Where the transcript goes
+
+- **`append`** (default) adds the transcript at the end of the draft, with a separating space when needed.
+- **`replace`** swaps the whole draft for the transcript, but only if the draft has not changed since recording began. If you typed while dictating, the transcript is appended instead.
+
+The text is inserted through the session's `slash/input-insert-text` editor command, not by rewriting the draft. Reference chips (`@path` references) already in the draft stay intact, and one undo removes the dictation. If the editor refuses the insert for longer than 500 ms, the control shows `transcript not inserted: <text>`, so the dictation is not lost.
+
+### Polish
+
+With `polish` on (it is off by default), the raw transcript is sent to the deployment's default model (the `agentDefaultModel` selection, not the model chosen in a particular session) with a conservative cleanup instruction: remove fillers and false starts, restore punctuation, fix obvious misrecognised technical terms, and turn spoken enumerations into Markdown lists. The instruction forbids answering, summarising or translating. `polishPrompt` replaces the instruction. If the model request fails, or no model is configured, the raw transcript is used. Polish needs no extra credential, but it does send the transcript text to that model; see [Privacy and security](#privacy-and-security).
+
+### Non-speech filter
+
+Whisper models print a word such as `you` or an annotation such as `(beep)` for silent audio, rather than nothing. The plugin filters that in three steps:
+
+1. A clip whose loudest moment (peak short-window RMS) stays below `0.005` is not sent at all. The control shows "nothing was heard". The whisper-cpp provider applies the same check to the WAV it receives, before starting the binary.
+2. Output made only of annotations (`[BLANK_AUDIO]`, `(wind blowing)`, `*music*`, music notes) is always dropped.
+3. A stock phrase (`you`, `thank you`, `thanks`, `thanks for watching`, `thank you for watching`, `bye`) is dropped only when the clip's peak was below `0.02`. A real one-word dictation spoken at a normal level still comes through.
+
+### Messages
+
+| Shown | Cause |
+|---|---|
+| no transcription provider | Provider unmounted while a clip was on its way to the host |
+| the provider's readiness detail, or transcription is not configured | Provider mounted but not ready |
+| microphone access was denied | Permission refused, or blocked by the page context |
+| no microphone is available | No input device, or the chosen device is gone |
+| this browser cannot record audio | No `MediaRecorder`, or `navigator.mediaDevices` is missing (insecure origin) |
+| the transcription provider accepts no format this browser can record | The provider's formats do not overlap the browser's, and the provider does not take WAV |
+| recording too long | Clip over `maxClipBytes`, or HTTP 413 from the endpoint |
+| transcription is unreachable | Host busy (see [limits](#host-limits)) |
+| transcription timed out / unsupported audio format / nothing was recorded / transcription failed | Other classified failures |
+
+### Settings card
+
+Open **Settings > Plugins > Plugin configuration** and expand **Voice input**. The card shows the provider and model with a Ready or Not ready badge (plus the reason when not ready, such as `no model configured` or `model file not found at …`; the microphone button's tooltip carries the same reason). It lets you edit the recording gesture, transcript placement, maximum recording length, AI polish and its prompt, silence stop, live preview interval, microphone and language. In the silence stop and live preview fields, `0` turns the feature off and a blank field restores the deployment's value. Edits are staged: **Save** writes them and **Discard** drops them. The microphone choice is saved immediately and stays in this browser only (`localStorage` key `achasoft.dsh-voice.deviceId`). Device names appear only after the browser has granted microphone access once.
+
+![Voice input settings card expanded, showing provider status and the editable fields](https://raw.githubusercontent.com/navid-kianfar/dsh-voice/main/docs/screenshots/settings.png)
 
 ## Requirements
 
-- A dsh installation with the Web Client (`@deepseek-ai/dsh-web-app`).
-- **A secure context.** Browsers only expose the microphone over HTTPS or on `localhost`; on any other plain-HTTP origin the button will not appear.
-- One transcription provider, configured below. Without one, the composer seat renders nothing and the settings card explains why — an unconfigured install shows no dead control.
+- dsh with the Web Client. This version was tested against dsh `0.1.5-rc.2`.
+- Node.js `^22.19` or `>=24`, and `pnpm` on `PATH` for `dsh plugin`.
+- **A secure browser context.** Browsers expose the microphone only over HTTPS or on `localhost` / `127.0.0.1`. If you open the Web Client over plain HTTP by LAN address or host name, the button still appears, but pressing it shows "this browser cannot record audio".
+- **Microphone permission** for the Web Client's origin. Pages embedded in another app or iframe need that host to allow microphone access. Otherwise the start fails with "microphone access was denied".
+- **One transcription provider**, set up as below.
+
+### whisper.cpp (local)
+
+Install the binary. On macOS with Homebrew, the formula is now named `whisper.cpp`, and `whisper-cpp` still resolves to it:
+
+```bash
+brew install whisper-cpp
+command -v whisper-cli     # e.g. /opt/homebrew/bin/whisper-cli
+```
+
+Download a GGML model to any path you choose:
+
+```bash
+mkdir -p ~/.dsh/models
+curl -L -o ~/.dsh/models/ggml-base.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+```
+
+`.en` models are English-only. For other languages, use a multilingual model such as `ggml-base.bin`. When `language` is blank the provider passes `-l auto`, so the binary detects the spoken language (left to itself, `whisper-cli` assumes `-l en`). Set `language` to a code such as `de` to skip detection.
+
+This is the exact command the provider runs, useful for checking your binary and model by hand on a 16 kHz mono WAV:
+
+```bash
+whisper-cli -m ~/.dsh/models/ggml-base.en.bin -f clip.wav --no-timestamps --no-prints -l auto
+```
+
+### OpenAI-compatible endpoint
+
+Any server that accepts `POST <baseUrl>/audio/transcriptions` as multipart form data (`model`, `file`, optional `language`) and returns JSON with a `text` field. For a hosted service, the API key must be resolvable by the harness credential seam under the name in `apiKeyEnv`: the launch environment, the stored credential file `$DSH_HOME/.credentials.yaml`, the working directory's `.env`, or `$DSH_HOME/.env`, in that order.
 
 ## Install
 
-`dsh plugin` forwards to pnpm, so any pnpm source works:
-
 ```bash
-dsh plugin --profile default add @achasoft/dsh-voice
+dsh plugin --profile web add @achasoft/dsh-voice
 ```
 
-<details>
-<summary>Other install sources</summary>
+`dsh plugin` runs `pnpm` in `$DSH_HOME/profiles/web` (`$DSH_HOME` defaults to `~/.dsh`). It then adds the package to that profile's `dsh.profile.bundles`, because the package declares a `dsh.bundle` patch. Restart `dsh web` to load it. A local checkout (`dsh plugin --profile web add ./dsh-voice`, resolved from your current directory and linked) must be built first with `npm run build`.
+
+Confirm the rows `voice`, `voice-ui`, `voice-openai-compatible` and `voice-whisper-cpp` are present:
 
 ```bash
-dsh plugin --profile default add ./achasoft-dsh-voice-0.1.0.tgz   # from `pnpm pack`
-dsh plugin --profile default add ./dsh-voice                       # a local checkout
-dsh plugin --profile default add github:achasoft/dsh-voice#<sha>   # from git
+dsh --profile web --dump-config
 ```
 
-A git install fetches sources, not build output. This package ships a `prepare` script that builds them, but pnpm ≥10 will not run it until you allow it — add the key pnpm names to your profile's `pnpm-workspace.yaml`:
+### How the configuration layers
+
+Later layers win: each bundle's `cordis.patch.yml` (including this package's) in bundle order, then `$DSH_HOME/profiles/web/cordis.patch.yml`, then `$DSH_HOME/cordis.patch.yml`, then `--patch` overlays. A patch entry that targets a row by `id` **replaces the row's whole `config`**, so restate every key you keep. Settings card edits are stored as user overrides in the `voice:` section of `$DSH_HOME/settings.yaml` and apply on top of the composed row.
+
+### Enable a provider
+
+Both provider rows ship disabled, and only one can be enabled: both claim `ctx.transcription`, and loading fails if two are mounted. Add one of the following to `$DSH_HOME/profiles/web/cordis.patch.yml`.
+
+whisper.cpp:
 
 ```yaml
-allowBuilds:
-  '@achasoft/dsh-voice': true
+- id: voice-whisper-cpp
+  disabled: false
+  config:
+    binaryPath: /opt/homebrew/bin/whisper-cli
+    modelPath: /Users/you/.dsh/models/ggml-base.en.bin
+    timeoutMs: 300000
+    maxOutputBytes: 262144
+    graceMs: 5000
 ```
 
-That is permission to execute this package's code at install time. Prefer the npm or tarball forms, which need no such allowance.
-</details>
-
-The bundle appends itself to your profile automatically. Verify with `dsh --profile default --dump-config`, which should show a `# == @achasoft/dsh-voice` layer.
-
-## Pick a provider
-
-Both providers claim `ctx.transcription`. **Enable exactly one** — a composition that mounts both fails loudly at load rather than silently preferring one.
-
-Enable your choice from your profile's own `cordis.patch.yml` (`$DSH_HOME/profiles/<name>/cordis.patch.yml`). A patch replaces a row's entire `config`, so restate every key.
-
-### Hosted or self-hosted HTTP — `openai-compatible`
-
-Speaks OpenAI's `/v1/audio/transcriptions`. One request shape reaches the hosted API, Groq, `faster-whisper-server`, `whisper.cpp`'s own server, and LM Studio.
+OpenAI-compatible (leave out `apiKeyEnv` for a local server that needs no authorisation):
 
 ```yaml
 - id: voice-openai-compatible
@@ -61,140 +153,116 @@ Speaks OpenAI's `/v1/audio/transcriptions`. One request shape reaches the hosted
     timeoutMs: 120000
 ```
 
-| Field | Meaning |
-|---|---|
-| `baseUrl` | Endpoint prefix without `/audio/transcriptions`. A local server might be `http://127.0.0.1:8000/v1`. |
-| `model` | Transcription model, e.g. `whisper-1` or `Systran/faster-whisper-small`. |
-| `apiKeyEnv` | **Name of an environment variable**, never the key. Omit entirely for a local server needing no authorization. |
-| `timeoutMs` | Deadline for one request. |
+### Uninstall
 
-**The key is addressed, never stored.** `apiKeyEnv` is a credential *reference*: the value is resolved from the harness credential seam at the start of every call and never cached, so rotating it reaches the next request with no restart. Your settings document stays safe to sync and to render in a UI.
-
-### Fully local, no network — `whisper-cpp`
-
-Runs a [whisper.cpp](https://github.com/ggerganov/whisper.cpp) binary through the harness subprocess seam. No server, no credential; the audio never leaves the machine.
-
-```yaml
-- id: voice-whisper-cpp
-  disabled: false
-  config:
-    binaryPath: /opt/whisper.cpp/build/bin/whisper-cli
-    modelPath: /opt/whisper.cpp/models/ggml-base.en.bin
-    timeoutMs: 300000
-    maxOutputBytes: 262144
-    graceMs: 5000
-    # threads: 4
+```bash
+dsh plugin --profile web remove @achasoft/dsh-voice
 ```
 
-The binary reads **16 kHz mono WAV and nothing else**, so this provider advertises only `audio/wav`. The browser re-encodes to that format using its own audio pipeline — no transcoder is installed anywhere.
+Then remove any `voice*` rows from your profile's `cordis.patch.yml`.
 
-## Settings
+## Configuration
 
-The **Voice input** card on the plugin settings tab edits these live; the values below are the composition defaults.
+### `voice` (preferences)
 
-| Field | Default | Meaning |
+| Key | Default in `cordis.patch.yml` | Schema | Settings card |
+|---|---|---|---|
+| `interactionMode` | `toggle` | required, `toggle` or `hold` | yes |
+| `insertMode` | `append` | required, `append` or `replace` | yes |
+| `maxClipSeconds` | `120` | required integer, `>= 1` | yes |
+| `maxClipBytes` | `26214400` (25 MiB) | required integer, `>= 1` | no |
+| `language` | unset | optional string, passed to the provider | yes |
+| `polish` | `false` | optional boolean, defaults to `false` | yes |
+| `polishPrompt` | unset (built-in instruction) | optional string | yes, while polish is on |
+| `silenceStopMs` | `2500` | optional integer, `>= 0`; `0` or unset disables | yes, see note |
+| `liveIntervalMs` | unset (commented `2000`) | optional integer, `>= 0`; `0` or unset disables | yes, see note |
+
+- `maxClipSeconds` is enforced by the browser. `maxClipBytes` is enforced by the host, which measures the base64 payload before decoding it.
+- Clearing an optional field in the card removes your override, so the composed value applies again. For `silenceStopMs` that is `2500`, so clearing it does **not** turn silence stop off. Enter `0` instead: it is stored as your override and disables the feature. The same holds for `liveIntervalMs` when your profile patch sets it.
+- `polish` is optional and defaults to `false`. Profiles and settings that already state `polish: true` keep it on.
+
+### `voice-whisper-cpp`
+
+| Key | Default | Schema |
 |---|---|---|
-| `interactionMode` | `toggle` | `toggle` = click to start, click to stop. `hold` = hold the button to talk. |
-| `insertMode` | `append` | Whether a transcript appends to the draft or replaces it. |
-| `maxClipSeconds` | `120` | Longest recording the browser will make. Reaching it ends the recording exactly like a stop — the clip is transcribed and the microphone released — and the control says the limit was hit. |
-| `maxClipBytes` | `26214400` | Largest clip the Host accepts (25 MiB, the hosted API's ceiling). |
-| `language` | *(unset)* | BCP-47 hint. Blank asks the provider to detect the language. |
-| `polish` | `true` | Clean the transcript with the session's own model — no second credential. |
-| `polishPrompt` | *(unset)* | Custom cleanup instruction. Blank uses the built-in one, which is deliberately conservative: it rewrites nothing it was not asked to. |
-| `silenceStopMs` | `2500` | End the recording after this much continuous silence. Blank disables it. |
-| `liveIntervalMs` | *(unset)* | Show a provisional transcript this often while recording. **Each pass re-transcribes from the beginning** — cheap against a local binary, billed per pass against a hosted endpoint, which is why it is opt-in. |
+| `binaryPath` | `whisper-cli` | required; an absolute path is recommended. A bare name is looked up on the host's scrubbed `PATH`, which is not necessarily your shell's `PATH` |
+| `modelPath` | `''` | required; absolute path to the GGML model file, or one starting with `~/`. Empty reports Not ready with `no model configured`; a relative path, a missing file or an unreadable one also reports Not ready with the reason |
+| `threads` | unset (whisper.cpp's own default) | optional integer, `>= 1`; passed as `-t` |
+| `timeoutMs` | `300000` | required integer, `>= 1` |
+| `maxOutputBytes` | `262144` | required integer; cap on captured stdout and stderr |
+| `graceMs` | `5000` | required integer; delay between SIGTERM and SIGKILL on cancel or timeout |
 
-The **microphone** is chosen in the card too, but stored in the browser rather than the settings document: which input device to use is a fact about the machine, not the account.
+Only `audio/wav` is accepted. The browser records in its native container and converts the clip to 16 kHz mono 16-bit WAV before uploading. The scratch file is written to a `dsh-voice-*` directory under the OS temp directory and deleted after each call.
 
-### Polish uses your model, not another key
+### `voice-openai-compatible`
 
-Cleanup runs through `ctx.llm` with the model your deployment already selected, so it needs no extra provider and no extra credential. A failed cleanup is never a failed dictation — the raw transcript is always what lands if the model request fails.
+| Key | Default | Schema |
+|---|---|---|
+| `baseUrl` | `https://api.openai.com/v1` | required; prefix without `/audio/transcriptions`; one trailing slash is removed |
+| `model` | `whisper-1` | required |
+| `apiKeyEnv` | `OPENAI_API_KEY` | optional credential reference (the key's name, never its value) |
+| `timeoutMs` | `120000` | required integer, `>= 1` |
 
-`maxClipSeconds` is the browser's gate and `maxClipBytes` is the Host's — the Host cannot measure a duration without decoding the audio, so the two limits exist for different reasons.
+Accepted formats are flac, m4a, mp4, mpeg, mpga, ogg, oga, wav and webm, so browsers upload their native recording (for example WebM/Opus). HTTP 401 and 403 are reported as "transcription is not configured".
 
-## How it works
+### Host limits
 
-```
-composer mic seat ─ getUserMedia → MediaRecorder → (re-encode to WAV if needed)
-        │                                            └─ negotiated against the provider
-        ▼  base64 over one unary RPC
-Host  VoiceService.transcribe() ─ byte cap ─ concurrency gate ─→ ctx.transcription ─┬─ openai-compatible
-        │                                                                          └─ whisper-cpp
-        ▼  { text } | { code, message }
-composer draft ← scoped `slash/input-insert-text` (spliced in place)
-```
+Each host runs at most **2** transcriptions at once and queues **4** more. Beyond that, a request is answered immediately with "transcription is unreachable" (the `provider-unavailable` code). Live-preview passes are cancelled when you stop, so they do not hold a slot the final pass needs.
 
-Three decisions worth knowing:
+## RPC and model-facing surface
 
-- **Nothing is persisted and nothing is model-facing.** The transcript reaches the model only if you send it, as ordinary user-message text. The plugin registers no prompt, no tool, and no session event; the audio is decoded, transcribed, and discarded inside one call.
-- **Failures cross the wire as values, not exceptions.** The RPC gateway erases a thrown error's classification, and the composer's next move depends on which class it was — "configure a provider" is not "try again".
-- **The transcript is spliced in, not written over the draft.** The installed composer is a rich editor whose draft holds reference chips; its `setDraft` rebuilds the document from plain text and would turn every chip back into literal `@path` text. The control inserts through the session scope's span-checked `slash/input-insert-text` verb instead — at the end of the draft for `append`, over the whole draft for `replace` — so chips survive and one undo removes the dictation.
-- **Silence is not sent, and whisper's silence words are not believed.** Whisper models print `you` or `(machine whirring)` for a silent clip rather than nothing. The browser skips transcribing a clip whose loudest moment never rose above room tone; annotation-only output is always dropped; and a stock phrase (`you`, `thank you`, …) is dropped only when the clip was quiet, so a real one-word dictation still lands. The whisper-cpp provider applies the same rule to the WAV it is given, without spawning the binary for silence.
-- **Transcription is admission-controlled.** A Host runs at most two transcriptions at once and queues four more; past that it answers `provider-unavailable` ("busy") immediately. Provisional passes are cancelled when you stop, so they never hold a slot the final pass needs. The byte cap is checked on the base64 length, before the clip is decoded.
-- **The recorder negotiates format.** `describe()` reports what the mounted provider accepts, so a WAV-only local binary and a container-flexible hosted API are the same code path.
+The browser uses three host methods on the `voice` namespace:
 
-## Writing another provider
+| Method | Purpose |
+|---|---|
+| `describe()` | Whether a provider is mounted and ready, its accepted formats, and the current preferences |
+| `transcribe({ audioBase64, mimeType })` | One clip to text. Failures come back as `{ ok: false, code, message }` values |
+| `polish(text)` | Cleanup through the deployment's default model |
 
-Import the package root for the Service Definition and register your own implementation as `ctx.transcription`:
+The plugin registers no tool, prompt or session event. A transcript reaches the conversation only when you send the draft as your own message.
 
-```ts
-import { TranscriptionEngine, TranscriptionError } from '@achasoft/dsh-voice'
+## Privacy and security
 
-export default class MyTranscription extends TranscriptionEngine {
-  async transcribe(clip, signal) { /* … */ }
-  async describe() { /* … */ }
-}
-```
+- **Audio** travels from the browser to the dsh host in the RPC request. With **whisper-cpp** it is processed on the host and deleted after the call. With **openai-compatible** it is uploaded to `baseUrl`. Neither provider stores audio or transcripts.
+- **Transcript text** is sent to the deployment's default model provider when `polish` is on (off by default). With whisper-cpp and a remote model, the audio stays local but the text does not. Turn polish off for fully local dictation.
+- **API keys** are resolved on the host at the start of each call and are never sent to the browser. `describe()` reports only whether a key is configured.
+- The microphone choice is stored in the browser's `localStorage` and is never written to the settings document.
 
-`transcribe` rejects only with `TranscriptionError`; its `code` is the closed union callers switch on (`not-configured` is the one a UI must treat differently). Silence returns empty `text` rather than failing — "nothing was said" is a successful outcome.
+## Known limitations
+
+- **The transcript goes at the end of the draft, not at the caret.** The control sits outside the editor and cannot read its selection.
+- **A gesture change applies after the next press.** An open composer keeps the `interactionMode` it loaded with until the button is pressed, which re-reads the settings, or the page is reloaded. The first press after a change is still handled with the previous gesture.
+- **Embedded or insecure contexts block the microphone.** See [Requirements](#requirements).
+- **No streaming.** Host methods are unary, so text arrives after you stop. The live preview re-transcribes the whole clip on each pass.
+- **The provider check does not load the model.** whisper-cpp reports Ready once the binary resolves and `modelPath` names a readable file, but it does not check that the file is a valid model. A corrupt or wrong file fails on the first dictation with the binary's error.
+- **whisper-cli exits 0 on unreadable audio.** The provider watches stderr for `error:`, `failed to read audio` and `failed to initialize whisper context` lines instead, and reports the end of stderr as the reason.
+- **Web Client only.** The terminal UI has no capture path.
 
 ## Development
 
-Development links against a **sibling deepseek-harness checkout**, because npm's published dsh
-packages lag the versions this plugin is built against. Clone both side by side:
+Development links against a deepseek-harness checkout two directories up (`../../deepseek-harness`, as set by the `link:` devDependencies):
 
-```
-your-workspace/
+```text
+workspace/
 ├── deepseek-harness/
-└── dsh-voice/          ← this repo
+└── dsh-plugins/
+    └── dsh-voice/   <- this repository
 ```
 
 ```bash
 pnpm install
-pnpm run build       # tsc emit → tsdown bundle (~1s)
-pnpm test            # Typert drift check + unit tests
-pnpm run typecheck
+npm test                 # Typert drift check, then vitest
+npm run build            # tsc emit, then tsdown bundle into lib/
+npm run check:typert     # only the Typert drift check
+npm run typecheck        # tsc --noEmit; needs a harness checkout matching the targeted harness
 ```
 
-`generated/` holds the Typert RPC contract. It is a build output of the harness's generator, which only runs inside a deepseek-harness checkout, so it is committed here — and `pnpm test` fails if the Host surface changed without it:
+`generated/` holds the Typert RPC contract. Only the harness generator can produce it, so it is committed, and `npm test` fails when it drifts from `src/host/`. Regenerate it from a clean harness checkout, one plugin at a time:
 
 ```bash
-pnpm run regen:typert /path/to/deepseek-harness
+node scripts/regen-typert.mjs ../../deepseek-harness
 ```
-
-That script stages the Host sources in the harness, builds, copies the artifacts back, and restores the checkout. It refuses to run against a dirty working tree.
-
-On a fresh clone pnpm may refuse esbuild's postinstall (`ERR_PNPM_IGNORED_BUILDS`), which then blocks every `pnpm run`. Run `pnpm approve-builds` once and pick esbuild. It is a dev-only transitive of vitest; consumers of the published package never install it.
-
-## Known limitations
-
-- **No streaming or partial transcripts.** The RPC gateway dispatches unary methods only, so a clip is transcribed after you stop recording. Live partials need a different transport.
-- **Provisional transcripts re-transcribe from the start.** A compressed stream's later chunks are not independently decodable, so each live pass covers the whole clip. That is why `liveIntervalMs` is opt-in rather than a default.
-- **Web Client only.** The terminal CLI has no capture path; adding one means a host-side recorder and an external binary.
-- **One provider at a time.** No runtime selection among several, and no fallback from a remote provider to a local one.
-- **Dictation lands at the end of the draft, not at the caret.** A seat outside the editor cannot read the editor's selection in the coordinates its insert verb accepts.
-- **Hold-to-talk needs the button held after the microphone opens.** Releasing it while the browser's permission prompt is still up cancels that start (the control says so); press again once access is granted.
-- **whisper-cli exits 0 on unreadable audio.** The provider reads its `error:` / `failed to read audio` lines instead, and reports the tail of stderr, where the reason is.
-- **`describe()` checks the whisper.cpp binary, not the model.** A missing or corrupt `modelPath` surfaces on the first real call, because verifying it means loading it.
 
 ## License
 
-MIT
-
----
-
-<details>
-<summary>Note on the publint CJS warning</summary>
-
-`publint` flags `exports["./client"]` as CJS inside a `"type": "module"` package. That is the required shape, not a defect: the Web Client fetches the browser half over HTTP and evaluates it as an opaque `window.__ModuleLoader__.load({ id, factory })` closure, so Node's ESM resolver never sees it. The harness's own UI plugin packages are built exactly the same way.
-</details>
+MIT. See [LICENSE](LICENSE).

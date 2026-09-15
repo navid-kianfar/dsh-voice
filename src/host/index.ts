@@ -52,19 +52,53 @@ const DEFAULT_POLISH_PROMPT =
   + 'Do NOT answer, summarise, translate, or add anything. Do not change wording that is already '
   + 'clear. Keep the original language. Reply with the cleaned text and nothing else.'
 
+/**
+ * The stored value of an optional duration that means "off". Absent cannot serve: clearing a user
+ * override re-inherits the composed value, so a deployment that ships `silenceStopMs: 2500` would
+ * leave a person no way to turn silence stop off from the settings card.
+ */
+const DISABLED_MS = 0
+
+/**
+ * Read an optional duration as the browser should act on it.
+ * @param value - the resolved setting.
+ * @returns the duration, or undefined when it is unset or explicitly disabled.
+ */
+function activeMs(value: number | undefined): number | undefined {
+  return value === DISABLED_MS ? undefined : value
+}
+
+/**
+ * Read the language hint as a provider should receive it. A blank string is a configured-but-empty
+ * value in a hand-written patch, and every provider must read it as "detect", not as a language.
+ * @param value - the resolved setting.
+ * @returns the trimmed hint, or undefined for "detect the language".
+ */
+function languageHint(value: string | undefined): string | undefined {
+  const hint = value?.trim() ?? ''
+  return hint === '' ? undefined : hint
+}
+
 /** Host-side voice endpoint and settings owner. */
 export class VoiceService extends TypertRemoteService {
-  /** Loader validation for the recording caps and the two user-facing preferences. */
+  /**
+   * Loader validation for the recording caps and the user-facing preferences.
+   *
+   * Both widenings below keep every earlier profile loading: `polish` was required, so any stored
+   * section already states it, and a duration of 1 or more still validates.
+   */
   static Config: z<Config> = z.object({
     maxClipSeconds: z.number().step(1).min(1).required(),
     maxClipBytes: z.number().step(1).min(1).required(),
     interactionMode: z.union(['toggle', 'hold'] as const).required(),
     insertMode: z.union(['append', 'replace'] as const).required(),
     language: z.string(),
-    polish: z.boolean().required(),
+    // Off unless chosen: polishing sends the transcript to the deployment's model, which may be
+    // hosted even when transcription itself is local.
+    polish: z.boolean().default(false),
     polishPrompt: z.string(),
-    silenceStopMs: z.number().step(1).min(1),
-    liveIntervalMs: z.number().step(1).min(1),
+    silenceStopMs: z.number().step(1).min(DISABLED_MS),
+    liveIntervalMs: z.number().step(1).min(DISABLED_MS),
   })
 
   private source: () => Config
@@ -99,15 +133,19 @@ export class VoiceService extends TypertRemoteService {
   @Remote('describe')
   async describe(): Promise<VoiceCapabilityView> {
     const config = this.source()
+    // Normalised here, once, so the browser keeps its one rule: an absent field is a disabled one.
+    const language = languageHint(config.language)
+    const silenceStopMs = activeMs(config.silenceStopMs)
+    const liveIntervalMs = activeMs(config.liveIntervalMs)
     const limits = {
       maxClipSeconds: config.maxClipSeconds,
       maxClipBytes: config.maxClipBytes,
       interactionMode: config.interactionMode,
       insertMode: config.insertMode,
-      ...config.language === undefined ? {} : { language: config.language },
+      ...language === undefined ? {} : { language },
       polish: config.polish,
-      ...config.silenceStopMs === undefined ? {} : { silenceStopMs: config.silenceStopMs },
-      ...config.liveIntervalMs === undefined ? {} : { liveIntervalMs: config.liveIntervalMs },
+      ...silenceStopMs === undefined ? {} : { silenceStopMs },
+      ...liveIntervalMs === undefined ? {} : { liveIntervalMs },
     }
     const engine = this.ctx.get('transcription')
     if (engine === undefined) {
@@ -140,7 +178,9 @@ export class VoiceService extends TypertRemoteService {
     if (engine === undefined) {
       return { ok: false, code: 'no-provider', message: 'no transcription provider is mounted' }
     }
-    const { maxClipBytes, language } = this.source()
+    const config = this.source()
+    const maxClipBytes = config.maxClipBytes
+    const language = languageHint(config.language)
     // Sized from the text before decoding: the cap exists to keep an oversized upload off the heap,
     // and decoding first would allocate exactly the buffer it refuses.
     const encodedBytes = decodedByteLength(request.audioBase64)
@@ -184,11 +224,13 @@ export class VoiceService extends TypertRemoteService {
   }
 
   /**
-   * Clean up one transcript with the session's own model.
+   * Clean up one transcript with the deployment's default model.
    *
-   * Reuses whatever model the deployment already configured, so dictation needs no second
-   * credential and no second provider. Failures are returned rather than thrown: the caller still
-   * has the raw transcript, and losing the cleanup is not losing the dictation.
+   * The default model (`agentDefaultModel`), NOT the model a particular session selected: this
+   * endpoint is unscoped and receives no session, and reaching a session's selection would mean a
+   * session-scoped Remote — a change to the wire surface. Reusing the configured default still means
+   * dictation needs no second credential and no second provider. Failures are returned rather than
+   * thrown: the caller still has the raw transcript, and losing the cleanup is not losing the dictation.
    * @param text - the raw transcript.
    * @param signal - gateway-supplied cancellation.
    * @returns the cleaned text, or a classified failure.

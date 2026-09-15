@@ -7,6 +7,7 @@ import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-cli
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import type { VoiceCapabilityView, VoiceSettings } from '../host/types.ts'
 import type { VoiceSettingsInjected } from './index.ts'
+import { millisecondsInvalid, plannedWrite, secondsInvalid, type EditableField } from './settings-fields.ts'
 import css from './VoiceSettingsCard.module.css'
 
 /** Props the renderer binds for the voice settings card. */
@@ -15,16 +16,8 @@ export type VoiceSettingsCardProps =
   & PropsLocale<'voice'>
   & InjectFace<VoiceSettingsInjected>
 
-/** Fields a person edits here; the rest of the section is deployment-owned. */
-type Editable = Pick<VoiceSettings,
-  'interactionMode' | 'insertMode' | 'maxClipSeconds' | 'language'
-  | 'polish' | 'polishPrompt' | 'silenceStopMs' | 'liveIntervalMs'>
-
-/** Optional whole-millisecond fields: blank clears them rather than storing a zero. */
-const OPTIONAL_MS: readonly (keyof Editable)[] = ['silenceStopMs', 'liveIntervalMs']
-
 /** Staged edits, keyed by field; absent means "unchanged from the resolved value". */
-type Draft = Partial<Record<keyof Editable, string>>
+type Draft = Partial<Record<EditableField, string>>
 
 /**
  * Read one field's staged text, falling back to the resolved value.
@@ -33,22 +26,11 @@ type Draft = Partial<Record<keyof Editable, string>>
  * @param field - the field to read.
  * @returns the text the control should display.
  */
-function shown(draft: Draft, value: VoiceSettings | undefined, field: keyof Editable): string {
+function shown(draft: Draft, value: VoiceSettings | undefined, field: EditableField): string {
   const staged = draft[field]
   if (staged !== undefined) return staged
   const resolved = value?.[field]
   return resolved === undefined ? '' : String(resolved)
-}
-
-/**
- * Whether a staged seconds value could be stored. The Host schema requires a positive integer, and a
- * write it would reject must be refused here — a rejected write leaves the field looking accepted.
- * @param text - the staged text.
- * @returns true when the value is unusable.
- */
-function secondsInvalid(text: string): boolean {
-  const parsed = Number(text)
-  return !Number.isSafeInteger(parsed) || parsed < 1
 }
 
 /**
@@ -91,20 +73,23 @@ export function VoiceSettingsCard(props: VoiceSettingsCardProps) {
   }, [describeVoice])
 
   const value = settings.value
-  const edit = (field: keyof Editable, text: string): void => {
+  const edit = (field: EditableField, text: string): void => {
     setFailed(false)
     setDraft(current => ({ ...current, [field]: text }))
   }
 
-  const changed = (Object.keys(draft) as (keyof Editable)[])
+  const changed = (Object.keys(draft) as EditableField[])
     .filter(field => draft[field] !== shown({}, value, field))
   const dirty = changed.length > 0
-  const msInvalid = (field: keyof Editable): boolean => {
+  const msInvalid = (field: EditableField): boolean => {
     const text = shown(draft, value, field)
-    return text !== '' && secondsInvalid(text)
+    return millisecondsInvalid(text)
   }
-  const invalid = secondsInvalid(shown(draft, value, 'maxClipSeconds'))
-    || msInvalid('silenceStopMs') || msInvalid('liveIntervalMs')
+  // Kept apart from `invalid` so a bad millisecond value marks its own field, not the seconds field
+  // and its "greater than zero" message, which 0 in a millisecond field no longer violates.
+  const secondsText = shown(draft, value, 'maxClipSeconds')
+  const secondsBad = secondsInvalid(secondsText)
+  const invalid = secondsBad || msInvalid('silenceStopMs') || msInvalid('liveIntervalMs')
   const writable = settings.writable && value !== undefined
 
   const save = (): void => {
@@ -114,15 +99,8 @@ export function VoiceSettingsCard(props: VoiceSettingsCardProps) {
     // overlapping them would make all but the first fail on a stale fence.
     void changed.reduce(
       (queue, field) => queue.then(() => {
-        const text = draft[field] ?? ''
-        if (field === 'maxClipSeconds') return setField(field, Number(text))
-        if (field === 'polish') return setField(field, text === 'true')
-        // A blank optional field is CLEARED, not stored empty: an empty `language` would read as
-        // configured-but-empty rather than "detect the language", and a 0 ms silence bound would
-        // read as "stop immediately" rather than "do not stop on silence".
-        if (OPTIONAL_MS.includes(field)) return text === '' ? unsetField(field) : setField(field, Number(text))
-        if ((field === 'language' || field === 'polishPrompt') && text === '') return unsetField(field)
-        return setField(field, text)
+        const write = plannedWrite(field, draft[field] ?? '')
+        return write.kind === 'unset' ? unsetField(field) : setField(field, write.value)
       }),
       Promise.resolve(),
     ).then(() => {
@@ -205,7 +183,7 @@ export function VoiceSettingsCard(props: VoiceSettingsCardProps) {
             <label className={css.field}>
               <div className={css.head}><span className={css.label}>{t('settings.maxClipSeconds')}</span></div>
               <input
-                className={invalid ? css.controlInvalid : css.control}
+                className={secondsBad ? css.controlInvalid : css.control}
                 type="number"
                 min={1}
                 inputMode="numeric"
@@ -213,7 +191,7 @@ export function VoiceSettingsCard(props: VoiceSettingsCardProps) {
                 value={shown(draft, value, 'maxClipSeconds')}
                 onChange={(event) => { edit('maxClipSeconds', event.target.value) }}
               />
-              {invalid ? <p className={css.invalid} role="status">{t('settings.invalidNumber')}</p> : null}
+              {secondsBad ? <p className={css.invalid} role="status">{t('settings.invalidNumber')}</p> : null}
             </label>
 
             <label className={css.field}>
@@ -227,6 +205,7 @@ export function VoiceSettingsCard(props: VoiceSettingsCardProps) {
                 <option value="true">{t('settings.polish.on')}</option>
                 <option value="false">{t('settings.polish.off')}</option>
               </select>
+              <p className={css.hint}>{t('settings.polish.hint')}</p>
             </label>
 
             {shown(draft, value, 'polish') === 'true' ? (
@@ -247,11 +226,12 @@ export function VoiceSettingsCard(props: VoiceSettingsCardProps) {
               <input
                 className={msInvalid('silenceStopMs') ? css.controlInvalid : css.control}
                 type="number"
-                min={1}
+                min={0}
                 disabled={!writable}
                 value={shown(draft, value, 'silenceStopMs')}
                 onChange={(event) => { edit('silenceStopMs', event.target.value) }}
               />
+              <p className={css.hint}>{t('settings.silenceStop.hint')}</p>
             </label>
 
             <label className={css.field}>
@@ -259,7 +239,7 @@ export function VoiceSettingsCard(props: VoiceSettingsCardProps) {
               <input
                 className={msInvalid('liveIntervalMs') ? css.controlInvalid : css.control}
                 type="number"
-                min={1}
+                min={0}
                 disabled={!writable}
                 value={shown(draft, value, 'liveIntervalMs')}
                 onChange={(event) => { edit('liveIntervalMs', event.target.value) }}

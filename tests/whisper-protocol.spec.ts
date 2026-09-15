@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildWhisperArgv, classifyExit, wavPeakRms } from '../src/providers/whisper-protocol.ts'
+import { buildWhisperArgv, classifyExit, resolveModelPath, wavPeakRms } from '../src/providers/whisper-protocol.ts'
 import { encodeWav } from '../src/client/audio.ts'
 
 const base = { binaryPath: '/opt/whisper-cli', modelPath: '/models/base.bin', wavPath: '/tmp/clip.wav' }
@@ -14,16 +14,48 @@ describe('buildWhisperArgv', () => {
     expect(argv).toEqual(expect.arrayContaining(['-m', '/models/base.bin', '-f', '/tmp/clip.wav']))
   })
 
-  it('omits the optional flags entirely when unset, leaving whisper.cpp its own defaults', () => {
+  it('omits threads when unset, leaving whisper.cpp its own default', () => {
     const argv = buildWhisperArgv(base)
     expect(argv).not.toContain('-t')
-    expect(argv).not.toContain('-l')
+  })
+
+  it('asks for auto-detection when no language is set, because whisper-cli 1.9.4 otherwise assumes English', () => {
+    const argv = buildWhisperArgv(base)
+    expect(argv.slice(argv.indexOf('-l'), argv.indexOf('-l') + 2)).toEqual(['-l', 'auto'])
+  })
+
+  it('treats a blank language as unset rather than passing an empty -l', () => {
+    const argv = buildWhisperArgv({ ...base, language: '  ' })
+    expect(argv.slice(argv.indexOf('-l'), argv.indexOf('-l') + 2)).toEqual(['-l', 'auto'])
   })
 
   it('passes threads and language through when configured', () => {
     const argv = buildWhisperArgv({ ...base, threads: 4, language: 'en' })
     expect(argv.slice(argv.indexOf('-t'), argv.indexOf('-t') + 2)).toEqual(['-t', '4'])
     expect(argv.slice(argv.indexOf('-l'), argv.indexOf('-l') + 2)).toEqual(['-l', 'en'])
+  })
+})
+
+describe('resolveModelPath', () => {
+  const home = '/Users/you'
+
+  it('reports an empty path as no model configured', () => {
+    expect(resolveModelPath('', home)).toEqual({ kind: 'unusable', detail: expect.stringMatching(/^no model configured/) })
+    expect(resolveModelPath('   ', home)).toMatchObject({ kind: 'unusable' })
+  })
+
+  it('expands a leading ~ to the Host user\'s home, since the binary is spawned without a shell', () => {
+    expect(resolveModelPath('~/.dsh/models/ggml-base.bin', home)).toEqual({ kind: 'resolved', path: '/Users/you/.dsh/models/ggml-base.bin' })
+    expect(resolveModelPath('~', home)).toEqual({ kind: 'resolved', path: '/Users/you' })
+  })
+
+  it('keeps an absolute path as it is', () => {
+    expect(resolveModelPath('/models/base.bin', home)).toEqual({ kind: 'resolved', path: '/models/base.bin' })
+  })
+
+  it('refuses a relative path, which the binary would resolve against its scratch directory', () => {
+    expect(resolveModelPath('models/base.bin', home)).toEqual({ kind: 'unusable', detail: expect.stringContaining('models/base.bin') })
+    expect(resolveModelPath('~other/base.bin', home)).toMatchObject({ kind: 'unusable' })
   })
 })
 

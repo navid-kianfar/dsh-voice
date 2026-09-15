@@ -96,17 +96,20 @@ export interface VoiceCapabilityView {
   readonly interactionMode: VoiceInteractionMode
   /** The deployment's current draft-insertion rule. */
   readonly insertMode: VoiceInsertMode
-  /** BCP-47 language hint passed to the provider; absent asks the provider to detect. */
+  /** BCP-47 language hint passed to the provider; absent (or blank in the settings) asks the provider to detect. */
   readonly language?: string
-  /** Whether a transcript is cleaned up by the session's model before it reaches the draft. */
+  /** Whether a transcript is cleaned up by the deployment's default model before it reaches the draft. */
   readonly polish: boolean
-  /** Continuous silence that ends a recording; absent leaves the duration cap as the only bound. */
+  /**
+   * Continuous silence that ends a recording; absent leaves the duration cap as the only bound. A
+   * stored 0 is reported as absent, so the recorder never sees a zero-length silence bound.
+   */
   readonly silenceStopMs?: number
-  /** Interval for provisional in-progress transcripts; absent disables them. */
+  /** Interval for provisional in-progress transcripts; absent disables them, and a stored 0 is reported as absent. */
   readonly liveIntervalMs?: number
 }
 
-/** A transcript the session's model rewrote. */
+/** A transcript the deployment's default model rewrote. */
 export interface VoicePolishSuccess {
   readonly ok: true
   /** The cleaned-up text. */
@@ -147,12 +150,15 @@ export interface VoiceSettings {
   interactionMode: VoiceInteractionMode
   /** Whether a transcript appends to the draft or replaces it. */
   insertMode: VoiceInsertMode
-  /** BCP-47 hint passed to the provider; omit to let the provider detect the language. */
+  /** BCP-47 hint passed to the provider; omit, or leave blank, to let the provider detect the language. */
   language?: string
   /**
-   * Run the raw transcript through the session's own model to remove fillers, restore punctuation,
-   * and turn spoken enumerations into lists. Dictation is speech, not prose; this is what makes it
-   * read like something a person typed.
+   * Run the raw transcript through the deployment's default model to remove fillers, restore
+   * punctuation, and turn spoken enumerations into lists. Dictation is speech, not prose; this is
+   * what makes it read like something a person typed.
+   *
+   * Off by default, because it sends the transcript text to that model: with the local whisper.cpp
+   * provider and a hosted model, the audio stays on the machine but the words do not.
    */
   polish: boolean
   /**
@@ -161,13 +167,14 @@ export interface VoiceSettings {
    */
   polishPrompt?: string
   /**
-   * Stop recording after this much continuous silence. Absent disables it, leaving
-   * {@link VoiceSettings.maxClipSeconds} as the only bound.
+   * Stop recording after this much continuous silence. 0 disables it, leaving
+   * {@link VoiceSettings.maxClipSeconds} as the only bound; absent does too, but only where no lower
+   * layer sets a value — clearing an override re-inherits the composed one, so 0 is the explicit off.
    */
   silenceStopMs?: number
   /**
    * While recording, re-transcribe what has been captured so far every this many milliseconds and
-   * show it as provisional text. Absent disables it.
+   * show it as provisional text. 0 disables it; absent does too where no lower layer sets a value.
    *
    * Each pass transcribes the clip from the beginning, because a compressed stream's later chunks
    * are not independently decodable. That is cheap against a local binary and BILLED PER PASS
